@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout,
     QSplitter, QMessageBox, QInputDialog, QListWidget,
     QListWidgetItem, QComboBox, QDialog, QFormLayout,
-    QLineEdit, QDialogButtonBox, QMenu, QFileDialog
+    QLineEdit, QDialogButtonBox, QMenu, QFileDialog, QStackedWidget
 )
 
 # =========================
@@ -64,10 +64,16 @@ def setup_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'Karakter Pendukung',
                 details TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )
         """)
+        # Upgrade databases created by older NopAI versions without losing data.
+        character_columns = {row[1] for row in conn.execute("PRAGMA table_info(characters)").fetchall()}
+        if "role" not in character_columns:
+            conn.execute("ALTER TABLE characters ADD COLUMN role TEXT NOT NULL DEFAULT 'Karakter Pendukung'")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS worldbuilding (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,6 +318,10 @@ class NopAI(QMainWindow):
         self.worker = None
         self.loading = False
         self.active_records_kind = None
+        self.active_record_id = None
+        self.reference_record_kind = None
+        self.reference_record_id = None
+        self.record_windows = {}
 
         setup_database()
         self.build_ui()
@@ -350,7 +360,7 @@ class NopAI(QMainWindow):
         side.addSpacing(12)
 
         side.addSpacing(12)
-        side.addWidget(QLabel("NOVEL SAYA"))
+        side.addWidget(QLabel("JUDUL SAYA"))
         project_row = QHBoxLayout()
         self.project_combo = QComboBox()
         self.project_combo.currentIndexChanged.connect(self.on_project_changed)
@@ -391,6 +401,14 @@ class NopAI(QMainWindow):
         export_button.clicked.connect(self.show_export_menu)
         header.addWidget(export_button)
         center_layout.addLayout(header)
+
+        # Area tengah memakai halaman bertumpuk: novel atau detail karakter/latar.
+        self.center_stack = QStackedWidget()
+        center_layout.addWidget(self.center_stack, 1)
+        self.chapter_page = QWidget()
+        chapter_page_layout = QVBoxLayout(self.chapter_page)
+        chapter_page_layout.setContentsMargins(0, 0, 0, 0)
+        chapter_page_layout.setSpacing(8)
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(3)
@@ -441,7 +459,7 @@ class NopAI(QMainWindow):
         # Daftar font umum yang relatif konsisten tersedia di Windows.
         # Menghindari enumerasi font legacy yang memicu warning DirectWrite.
         self.font_family_combo.addItems([
-            "Arial", "Calibri", "Cambria", "Georgia", "Times New Roman",
+            "Arial", "Calibri", "Cambria", "Garamond", "Georgia", "Times New Roman",
             "Verdana", "Tahoma", "Trebuchet MS", "Segoe UI", "Consolas",
             "Courier New"
         ])
@@ -468,7 +486,7 @@ class NopAI(QMainWindow):
         self.font_size_combo.lineEdit().returnPressed.connect(self.apply_font_size)
         toolbar.addWidget(self.font_size_combo)
         toolbar.addStretch(1)
-        center_layout.addLayout(toolbar)
+        chapter_page_layout.addLayout(toolbar)
 
         self.editor = QTextEdit()
         self.editor.setAcceptRichText(True)
@@ -478,7 +496,41 @@ class NopAI(QMainWindow):
         self.editor.cursorPositionChanged.connect(self.update_format_indicators)
         self.editor.selectionChanged.connect(self.update_format_indicators)
         self.editor.setTabChangesFocus(False)
-        center_layout.addWidget(self.editor, 1)
+
+        # Panel referensi ini muncul saat halaman karakter/latar diminimize.
+        # Editor novel tetap aktif sehingga pengguna bisa menulis sambil membaca referensi.
+        self.editor_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.editor_splitter.setChildrenCollapsible(False)
+        self.editor_splitter.addWidget(self.editor)
+
+        self.reference_panel = QFrame()
+        self.reference_panel.setObjectName("panel")
+        self.reference_panel.setMinimumWidth(190)
+        reference_layout = QVBoxLayout(self.reference_panel)
+        reference_layout.setContentsMargins(10, 10, 10, 10)
+        reference_layout.setSpacing(7)
+        reference_header = QHBoxLayout()
+        self.reference_heading = QLabel("Referensi")
+        self.reference_heading.setObjectName("heading")
+        reference_header.addWidget(self.reference_heading, 1)
+        self.reference_close_button = QPushButton("×")
+        self.reference_close_button.setFixedSize(28, 28)
+        self.reference_close_button.setToolTip("Tutup panel referensi")
+        self.reference_close_button.clicked.connect(self.hide_reference_panel)
+        reference_header.addWidget(self.reference_close_button)
+        reference_layout.addLayout(reference_header)
+        self.reference_details = QTextEdit()
+        self.reference_details.setReadOnly(True)
+        self.reference_details.setAcceptRichText(False)
+        self.reference_details.setPlaceholderText("Minimize halaman karakter atau latar untuk menampilkan referensi di sini.")
+        reference_layout.addWidget(self.reference_details, 1)
+        self.reference_open_button = QPushButton("Buka halaman untuk edit")
+        self.reference_open_button.clicked.connect(self.restore_reference_page)
+        reference_layout.addWidget(self.reference_open_button)
+        self.reference_panel.hide()
+        self.editor_splitter.addWidget(self.reference_panel)
+        self.editor_splitter.setSizes([700, 0])
+        chapter_page_layout.addWidget(self.editor_splitter, 1)
 
         # Familiar Word shortcuts for paragraph alignment.
         QShortcut(QKeySequence("Ctrl+L"), self.editor, activated=lambda: self.apply_alignment("left"))
@@ -491,7 +543,53 @@ class NopAI(QMainWindow):
         footer.addWidget(self.word_label)
         footer.addStretch()
         footer.addWidget(QLabel("Disimpan lokal • Markdown"))
-        center_layout.addLayout(footer)
+        chapter_page_layout.addLayout(footer)
+        self.center_stack.addWidget(self.chapter_page)
+
+        # Halaman karakter/latar di area tengah, bukan dialog pop-up.
+        self.record_page = QWidget()
+        record_layout = QVBoxLayout(self.record_page)
+        record_layout.setContentsMargins(8, 8, 8, 8)
+        record_layout.setSpacing(10)
+        self.record_page_heading = QLabel("Detail Karakter / Latar")
+        self.record_page_heading.setObjectName("heading")
+        record_layout.addWidget(self.record_page_heading)
+        record_layout.addWidget(QLabel("Nama"))
+        self.record_name_input = QLineEdit()
+        self.record_name_input.setPlaceholderText("Masukkan nama karakter atau latar")
+        record_layout.addWidget(self.record_name_input)
+        self.record_role_label = QLabel("Role Karakter")
+        record_layout.addWidget(self.record_role_label)
+        self.record_role_input = QComboBox()
+        self.record_role_input.setEditable(True)
+        self.record_role_input.addItems([
+            "Protagonis", "Antagonis", "Deuteragonis", "Tritagonis",
+            "Karakter Pendukung", "Mentor", "Love Interest", "Sidekick",
+            "Figuran", "Lainnya"
+        ])
+        self.record_role_input.setToolTip("Pilih role karakter atau ketik role buatan sendiri")
+        record_layout.addWidget(self.record_role_input)
+        self.record_category_label = QLabel("Kategori")
+        record_layout.addWidget(self.record_category_label)
+        self.record_category_input = QComboBox()
+        self.record_category_input.setEditable(True)
+        self.record_category_input.addItems(["Lore", "Lokasi", "Faksi", "Sistem Kekuatan", "Benda", "Sejarah", "Lainnya"])
+        record_layout.addWidget(self.record_category_input)
+        record_layout.addWidget(QLabel("Detail / Deskripsi"))
+        self.record_details_input = QTextEdit()
+        self.record_details_input.setPlaceholderText("Tulis detail karakter atau latar di sini...")
+        record_layout.addWidget(self.record_details_input, 1)
+        record_buttons = QHBoxLayout()
+        record_buttons.addStretch()
+        self.record_back_button = QPushButton("Kembali ke Novel")
+        self.record_back_button.clicked.connect(self.minimize_record_page)
+        record_buttons.addWidget(self.record_back_button)
+        self.record_save_button = QPushButton("Simpan")
+        self.record_save_button.setObjectName("primary")
+        self.record_save_button.clicked.connect(self.save_record_form)
+        record_buttons.addWidget(self.record_save_button)
+        record_layout.addLayout(record_buttons)
+        self.center_stack.addWidget(self.record_page)
 
         # AI panel
         ai_panel = QFrame()
@@ -537,7 +635,7 @@ class NopAI(QMainWindow):
         context_layout = QVBoxLayout(context_panel)
         context_layout.setContentsMargins(10, 10, 10, 10)
         context_layout.setSpacing(6)
-        context_title = QLabel("KONTEKS CEPAT")
+        context_title = QLabel("DETAIL CERITA")
         context_title.setObjectName("heading")
         context_layout.addWidget(context_title)
         context_layout.addWidget(QLabel("Karakter"))
@@ -563,7 +661,8 @@ class NopAI(QMainWindow):
         splitter.addWidget(center)
         splitter.addWidget(context_panel)
         splitter.addWidget(ai_panel)
-        splitter.setSizes([600, 300, 340])
+        # AI berada di sisi paling kanan, sementara konteks tetap di sebelah editor.
+        splitter.setSizes([650, 250, 340])
 
         root_layout.addWidget(sidebar)
         root_layout.addWidget(splitter, 1)
@@ -607,6 +706,11 @@ class NopAI(QMainWindow):
         self.project_title = self.project_combo.currentText()
         self.load_chapters()
         self.refresh_context_lists()
+        if hasattr(self, "center_stack"):
+            self.center_stack.setCurrentWidget(self.chapter_page)
+            self.reference_record_kind = None
+            self.reference_record_id = None
+            self.hide_reference_panel()
 
     def new_project(self):
         title, ok = QInputDialog.getText(
@@ -746,7 +850,7 @@ class NopAI(QMainWindow):
                     (self.project_id,)
                 ).fetchall()
                 characters = conn.execute(
-                    "SELECT name, details FROM characters WHERE project_id = ? ORDER BY name",
+                    "SELECT name, role, details FROM characters WHERE project_id = ? ORDER BY role, name",
                     (self.project_id,)
                 ).fetchall()
                 lore_entries = conn.execute(
@@ -783,8 +887,9 @@ class NopAI(QMainWindow):
             document.add_page_break()
             document.add_heading("Karakter", level=1)
             if characters:
-                for character_name, details in characters:
+                for character_name, role, details in characters:
                     document.add_heading(character_name, level=2)
+                    document.add_paragraph(f"Role: {role or 'Karakter Pendukung'}")
                     for paragraph in (details or "").replace("\r\n", "\n").split("\n"):
                         document.add_paragraph(paragraph)
             else:
@@ -871,9 +976,17 @@ class NopAI(QMainWindow):
 
     def open_chapter(self, chapter_id):
         if chapter_id == self.chapter_id:
+            # Klik bab aktif juga bisa dipakai untuk kembali dari halaman karakter/latar.
+            if hasattr(self, "center_stack") and self.center_stack.currentWidget() is self.record_page:
+                if self.save_record_form(return_to_novel=False):
+                    self.center_stack.setCurrentWidget(self.chapter_page)
+                    self.chapter_heading.setText(self.chapter_title or "Editor Novel")
             return
 
         self.save_current_chapter()
+        if hasattr(self, "center_stack") and self.center_stack.currentWidget() is self.record_page:
+            self.save_record_form(return_to_novel=False)
+            self.center_stack.setCurrentWidget(self.chapter_page)
 
         with db() as conn:
             row = conn.execute("""
@@ -896,6 +1009,8 @@ class NopAI(QMainWindow):
         self.update_format_indicators()
 
         self.chapter_heading.setText(self.chapter_title)
+        if hasattr(self, "center_stack"):
+            self.center_stack.setCurrentWidget(self.chapter_page)
         self.update_word_count()
         self.save_label.setText("● Bab dimuat")
 
@@ -1139,13 +1254,26 @@ class NopAI(QMainWindow):
         self.character_list.clear()
         self.world_list.clear()
         with db() as conn:
-            chars = conn.execute("SELECT id, name, details FROM characters WHERE project_id = ? ORDER BY name", (self.project_id,)).fetchall()
+            chars = conn.execute("SELECT id, name, role, details FROM characters WHERE project_id = ? ORDER BY role, name", (self.project_id,)).fetchall()
             worlds = conn.execute("SELECT id, name, category, details FROM worldbuilding WHERE project_id = ? ORDER BY category, name", (self.project_id,)).fetchall()
-        # Panel kanan hanya menampilkan nama. Detail lengkap dibuka di halaman editor.
-        for record_id, name, details in chars:
-            item = QListWidgetItem(name)
+        # Kelompokkan karakter berdasarkan role, serupa dengan pengelompokan latar.
+        current_role = None
+        for record_id, name, role, details in chars:
+            role = role or "Karakter Pendukung"
+            if role != current_role:
+                current_role = role
+                header = QListWidgetItem(role.upper())
+                header.setFlags(Qt.ItemFlag.NoItemFlags)
+                header.setData(Qt.ItemDataRole.UserRole, None)
+                font = header.font()
+                font.setBold(True)
+                header.setFont(font)
+                # Warna judul kelompok dibuat terang agar jelas di tema gelap.
+                header.setForeground(QColor("#c3b8ff"))
+                self.character_list.addItem(header)
+            item = QListWidgetItem("   " + name)
             item.setData(Qt.ItemDataRole.UserRole, record_id)
-            item.setToolTip("Klik dua kali untuk membuka halaman karakter")
+            item.setToolTip(f"Role: {role}\nKlik dua kali untuk membuka halaman karakter")
             self.character_list.addItem(item)
 
         # Kelompokkan latar berdasarkan kategori supaya daftar panjang tetap rapi.
@@ -1156,13 +1284,10 @@ class NopAI(QMainWindow):
                 header = QListWidgetItem(category.upper())
                 header.setFlags(Qt.ItemFlag.NoItemFlags)
                 header.setData(Qt.ItemDataRole.UserRole, None)
-                # Header kategori dibuat lebih terang dan diberi latar tipis
-                # agar mudah dibedakan dari nama latar biasa.
-                header.setForeground(QColor("#8AB4F8"))
-                header.setBackground(QColor("#303744"))
+                # Gunakan warna terang yang sama dengan judul kelompok karakter.
+                header.setForeground(QColor("#c3b8ff"))
                 font = header.font()
                 font.setBold(True)
-                font.setPointSize(max(font.pointSize(), 10))
                 header.setFont(font)
                 self.world_list.addItem(header)
             item = QListWidgetItem("   " + name)
@@ -1170,52 +1295,300 @@ class NopAI(QMainWindow):
             item.setToolTip("Klik dua kali untuk membuka halaman latar")
             self.world_list.addItem(item)
 
+        if getattr(self, "reference_record_id", None) is not None:
+            self.show_reference_for_active_record()
+
     def add_record(self, kind):
-        is_character = kind == "characters"
-        heading = "Karakter" if is_character else "Latar"
-        dialog = RecordDialog(self, f"Tambah {heading}", category=None if is_character else "Lore")
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self.project_id is None:
+            QMessageBox.information(self, "NopAI", "Pilih atau buat novel terlebih dahulu.")
             return
-        name, details, category = dialog.values()
-        if not name:
-            QMessageBox.warning(self, "NopAI", "Nama tidak boleh kosong.")
-            return
-        with db() as conn:
-            if is_character:
-                conn.execute("INSERT INTO characters (project_id, name, details) VALUES (?, ?, ?)", (self.project_id, name, details))
-            else:
-                conn.execute("INSERT INTO worldbuilding (project_id, name, category, details) VALUES (?, ?, ?, ?)", (self.project_id, name, category, details))
-        self.refresh_context_lists()
+        self.open_record_window(kind)
 
     def edit_record_from_item(self, kind, item):
-        if item is None:
+        if item is None or self.project_id is None:
             return
         record_id = item.data(Qt.ItemDataRole.UserRole)
         if record_id is None:
             return
+        self.open_record_window(kind, record_id)
+
+    def open_record_window(self, kind, record_id=None):
+        """Buka editor karakter/latar sebagai jendela mengambang non-modal.
+
+        Jendela dapat dipindahkan, diubah ukurannya, diminimalkan, dan tetap
+        membiarkan pengguna mengetik di editor novel di belakangnya.
+        """
+        if kind not in ("characters", "worldbuilding") or self.project_id is None:
+            return
+
+        key = (self.project_id, kind, record_id)
+        existing = self.record_windows.get(key)
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    existing.showNormal()
+                    existing.raise_()
+                    existing.activateWindow()
+                    return
+            except RuntimeError:
+                pass
+
+        is_character = kind == "characters"
+        record = None
+        if record_id is not None:
+            with db() as conn:
+                if is_character:
+                    record = conn.execute(
+                        "SELECT name, role, details FROM characters WHERE id = ? AND project_id = ?",
+                        (record_id, self.project_id)
+                    ).fetchone()
+                else:
+                    record = conn.execute(
+                        "SELECT name, category, details FROM worldbuilding WHERE id = ? AND project_id = ?",
+                        (record_id, self.project_id)
+                    ).fetchone()
+            if not record:
+                return
+
+        window = QDialog(self, Qt.WindowType.Window)
+        window.setWindowTitle(("Karakter" if is_character else "Latar / Worldbuilding") + (f" — {record[0]}" if record else " — Baru"))
+        window.resize(520, 560)
+        window.setMinimumSize(380, 360)
+        window.setModal(False)
+        layout = QVBoxLayout(window)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+
+        form = QFormLayout()
+        name_input = QLineEdit(record[0] if record else "")
+        name_input.setPlaceholderText("Nama karakter atau latar")
+        form.addRow("Nama:", name_input)
+
+        role_input = None
+        category_input = None
+        if is_character:
+            role_input = QComboBox()
+            role_input.setEditable(True)
+            role_input.addItems([
+                "Protagonis", "Antagonis", "Deuteragonis", "Tritagonis",
+                "Karakter Pendukung", "Mentor", "Love Interest", "Sidekick",
+                "Figuran", "Lainnya"
+            ])
+            role_input.setCurrentText((record[1] if record else "Karakter Pendukung") or "Karakter Pendukung")
+            role_input.setToolTip("Pilih role atau ketik role buatan sendiri")
+            form.addRow("Role:", role_input)
+        else:
+            category_input = QComboBox()
+            category_input.setEditable(True)
+            category_input.addItems(["Lore", "Lokasi", "Faksi", "Sistem Kekuatan", "Benda", "Sejarah", "Lainnya"])
+            category_input.setCurrentText((record[1] if record else "Lore") or "Lore")
+            form.addRow("Kategori:", category_input)
+
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Detail / Deskripsi:"))
+        details_input = QTextEdit()
+        details_input.setPlaceholderText("Tulis detail karakter atau latar di sini...")
+        details_input.setPlainText((record[2] if record else "") or "")
+        layout.addWidget(details_input, 1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        save_button = QPushButton("Simpan")
+        save_button.setObjectName("primary")
+        close_button = QPushButton("Tutup")
+        button_row.addWidget(close_button)
+        button_row.addWidget(save_button)
+        layout.addLayout(button_row)
+
+        key_holder = [key]
+
+        def save_record():
+            nonlocal record_id
+            name = name_input.text().strip()
+            if not name:
+                QMessageBox.warning(window, "NopAI", "Nama tidak boleh kosong.")
+                name_input.setFocus()
+                return
+            details = details_input.toPlainText().strip()
+            with db() as conn:
+                if is_character:
+                    role = role_input.currentText().strip() or "Karakter Pendukung"
+                    if record_id is None:
+                        cur = conn.execute(
+                            "INSERT INTO characters (project_id, name, role, details) VALUES (?, ?, ?, ?)",
+                            (self.project_id, name, role, details)
+                        )
+                        record_id = cur.lastrowid
+                    else:
+                        conn.execute(
+                            "UPDATE characters SET name = ?, role = ?, details = ? WHERE id = ? AND project_id = ?",
+                            (name, role, details, record_id, self.project_id)
+                        )
+                else:
+                    category = category_input.currentText().strip() or "Lore"
+                    if record_id is None:
+                        cur = conn.execute(
+                            "INSERT INTO worldbuilding (project_id, name, category, details) VALUES (?, ?, ?, ?)",
+                            (self.project_id, name, category, details)
+                        )
+                        record_id = cur.lastrowid
+                    else:
+                        conn.execute(
+                            "UPDATE worldbuilding SET name = ?, category = ?, details = ? WHERE id = ? AND project_id = ?",
+                            (name, category, details, record_id, self.project_id)
+                        )
+            # Sesuaikan judul jendela sesudah penyimpanan; daftar terkelompok ikut diperbarui.
+            window.setWindowTitle(("Karakter" if is_character else "Latar / Worldbuilding") + f" — {name}")
+            # Jendela tambah berubah menjadi jendela edit setelah record pertama disimpan.
+            new_key = (self.project_id, kind, record_id)
+            if key_holder[0] != new_key:
+                self.record_windows.pop(key_holder[0], None)
+                self.record_windows[new_key] = window
+                key_holder[0] = new_key
+            self.refresh_context_lists()
+            self.save_label.setText("● Data karakter/latar tersimpan")
+
+        save_button.clicked.connect(save_record)
+        close_button.clicked.connect(window.close)
+        window.finished.connect(lambda _result: self.record_windows.pop(key_holder[0], None))
+        self.record_windows[key] = window
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def save_record_form(self, return_to_novel=False):
+        if self.project_id is None or self.active_records_kind not in ("characters", "worldbuilding"):
+            return False
+        name = self.record_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "NopAI", "Nama tidak boleh kosong.")
+            self.record_name_input.setFocus()
+            return False
+
+        details = self.record_details_input.toPlainText()
+        is_character = self.active_records_kind == "characters"
+        category = self.record_category_input.currentText().strip() or "Lore"
+        role = self.record_role_input.currentText().strip() or "Karakter Pendukung"
+        with db() as conn:
+            if is_character:
+                if self.active_record_id is None:
+                    cur = conn.execute(
+                        "INSERT INTO characters (project_id, name, role, details) VALUES (?, ?, ?, ?)",
+                        (self.project_id, name, role, details)
+                    )
+                    self.active_record_id = cur.lastrowid
+                else:
+                    conn.execute(
+                        "UPDATE characters SET name = ?, role = ?, details = ? WHERE id = ? AND project_id = ?",
+                        (name, role, details, self.active_record_id, self.project_id)
+                    )
+            else:
+                if self.active_record_id is None:
+                    cur = conn.execute(
+                        "INSERT INTO worldbuilding (project_id, name, category, details) VALUES (?, ?, ?, ?)",
+                        (self.project_id, name, category, details)
+                    )
+                    self.active_record_id = cur.lastrowid
+                else:
+                    conn.execute(
+                        "UPDATE worldbuilding SET name = ?, details = ?, category = ? WHERE id = ? AND project_id = ?",
+                        (name, details, category, self.active_record_id, self.project_id)
+                    )
+
+        self.record_page_heading.setText(("Karakter: " if is_character else "Latar: ") + name)
+        self.chapter_heading.setText(self.record_page_heading.text())
+        self.refresh_context_lists()
+        self.save_label.setText("● Data karakter/latar tersimpan")
+        if return_to_novel:
+            self.reference_record_kind = self.active_records_kind
+            self.reference_record_id = self.active_record_id
+            self.show_reference_for_active_record()
+            self.center_stack.setCurrentWidget(self.chapter_page)
+            self.chapter_heading.setText(self.chapter_title or "Editor Novel")
+        return True
+
+    def minimize_record_page(self):
+        # Form tambah yang masih kosong boleh ditutup tanpa membuat data kosong.
+        if self.active_record_id is None and not self.record_name_input.text().strip():
+            self.center_stack.setCurrentWidget(self.chapter_page)
+            self.chapter_heading.setText(self.chapter_title or "Editor Novel")
+            self.active_records_kind = None
+            self.active_record_id = None
+            return
+        # Simpan sebelum mengecilkan halaman agar perubahan tidak hilang.
+        self.save_record_form(return_to_novel=True)
+
+    def restore_reference_page(self):
+        """Buka kembali halaman edit dari panel referensi yang sedang diminimize."""
+        kind = self.reference_record_kind
+        record_id = self.reference_record_id
+        if kind not in ("characters", "worldbuilding") or record_id is None:
+            return
         is_character = kind == "characters"
         with db() as conn:
             if is_character:
-                row = conn.execute("SELECT name, details FROM characters WHERE id = ? AND project_id = ?", (record_id, self.project_id)).fetchone()
+                row = conn.execute(
+                    "SELECT name, details, role FROM characters WHERE id = ? AND project_id = ?",
+                    (record_id, self.project_id)
+                ).fetchone()
                 category = None
+                role = row[2] if row else "Karakter Pendukung"
             else:
-                row = conn.execute("SELECT name, details, category FROM worldbuilding WHERE id = ? AND project_id = ?", (record_id, self.project_id)).fetchone()
+                row = conn.execute(
+                    "SELECT name, details, category FROM worldbuilding WHERE id = ? AND project_id = ?",
+                    (record_id, self.project_id)
+                ).fetchone()
                 category = row[2] if row else "Lore"
+                role = "Karakter Pendukung"
         if not row:
+            self.hide_reference_panel()
             return
-        dialog = RecordDialog(self, f"Halaman {'Karakter' if is_character else 'Latar'}: {row[0]}", row[0], row[1], category)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        self.active_records_kind = kind
+        self.active_record_id = record_id
+        self.record_name_input.setText(row[0])
+        self.record_details_input.setPlainText(row[1] or "")
+        self.record_page_heading.setText(("Karakter: " if is_character else "Latar: ") + row[0])
+        self.record_role_label.setVisible(is_character)
+        self.record_role_input.setVisible(is_character)
+        self.record_category_label.setVisible(not is_character)
+        self.record_category_input.setVisible(not is_character)
+        if is_character:
+            self.record_role_input.setCurrentText(role or "Karakter Pendukung")
+        else:
+            self.record_category_input.setCurrentText(category or "Lore")
+        self.center_stack.setCurrentWidget(self.record_page)
+        self.chapter_heading.setText(self.record_page_heading.text())
+
+    def show_reference_for_active_record(self):
+        if self.reference_record_kind not in ("characters", "worldbuilding") or self.reference_record_id is None:
             return
-        name, details, new_category = dialog.values()
-        if not name:
-            QMessageBox.warning(self, "NopAI", "Nama tidak boleh kosong.")
-            return
+        is_character = self.reference_record_kind == "characters"
         with db() as conn:
             if is_character:
-                conn.execute("UPDATE characters SET name = ?, details = ? WHERE id = ? AND project_id = ?", (name, details, record_id, self.project_id))
+                row = conn.execute(
+                    "SELECT name, details, role FROM characters WHERE id = ? AND project_id = ?",
+                    (self.reference_record_id, self.project_id)
+                ).fetchone()
+                category = None
+                role = row[2] if row else "Karakter Pendukung"
             else:
-                conn.execute("UPDATE worldbuilding SET name = ?, details = ?, category = ? WHERE id = ? AND project_id = ?", (name, details, new_category, record_id, self.project_id))
-        self.refresh_context_lists()
+                row = conn.execute(
+                    "SELECT name, details, category FROM worldbuilding WHERE id = ? AND project_id = ?",
+                    (self.reference_record_id, self.project_id)
+                ).fetchone()
+                category = row[2] if row else None
+        if not row:
+            return
+        name, details = row[0], row[1] or ""
+        heading_prefix = f"{role or 'Karakter Pendukung'}: " if is_character else f"{category or 'Latar'}: "
+        self.reference_heading.setText(heading_prefix + name)
+        self.reference_details.setPlainText(details or "Belum ada detail.")
+        self.reference_panel.show()
+        self.editor_splitter.setSizes([max(350, self.editor_splitter.width() - 250), 250])
+
+    def hide_reference_panel(self):
+        self.reference_panel.hide()
+        self.editor_splitter.setSizes([self.editor_splitter.width(), 0])
 
     def show_record_menu(self, kind, widget, pos):
         item = widget.itemAt(pos)
@@ -1257,8 +1630,8 @@ class NopAI(QMainWindow):
     def build_story_context(self):
         with db() as conn:
             characters = conn.execute("""
-                SELECT name, details FROM characters
-                WHERE project_id = ? ORDER BY name
+                SELECT name, role, details FROM characters
+                WHERE project_id = ? ORDER BY role, name
             """, (self.project_id,)).fetchall()
 
             world_items = conn.execute("""
@@ -1267,7 +1640,8 @@ class NopAI(QMainWindow):
             """, (self.project_id,)).fetchall()
 
         character_context = "\n".join(
-            f"- {name}: {details}" for name, details in characters
+            f"- [{role or 'Karakter Pendukung'}] {name}: {details}"
+            for name, role, details in characters
         ) or "Belum ada data karakter."
 
         world_context = "\n".join(
