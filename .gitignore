@@ -1,19 +1,33 @@
-# Python
+
+# Git
+.git/
+
+# Python virtual environment
+.venv/
+
+# Application logs
+nopai.log
+nopai_error.log
+*.log
+
+# Database and local data
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Novel files (personal writing)
+novels/
+
+# Python cache
 __pycache__/
 *.py[cod]
-.venv/
-venv/
+
+# Temporary files
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Environment variables
 .env
-
-# Database lokal berisi data novel
-data/nopai.db
-data/nopai.db-journal
-data/nopai.db-wal
-data/nopai.db-shm
-
-# File editor
-.vscode/
-.idea/
-
-# Log
-*.log

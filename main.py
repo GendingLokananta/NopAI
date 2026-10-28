@@ -5,7 +5,7 @@ from pathlib import Path
 import requests
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QTextCharFormat, QTextListFormat, QFont, QShortcut, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout,
@@ -53,6 +53,12 @@ def setup_database():
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )
         """)
+        # Rich-text HTML is stored separately so formatting survives reopening,
+        # while the plain-text content column remains compatible with AI features.
+        chapter_columns = {row[1] for row in conn.execute("PRAGMA table_info(chapters)").fetchall()}
+        if "content_html" not in chapter_columns:
+            conn.execute("ALTER TABLE chapters ADD COLUMN content_html TEXT NOT NULL DEFAULT ''")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS characters (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,12 +167,18 @@ def create_chapter(project_id, title):
         return cur.lastrowid
 
 
-def save_chapter(chapter_id, title, content):
+def save_chapter(chapter_id, title, content, content_html=None):
     with db() as conn:
-        conn.execute("""
-            UPDATE chapters SET title = ?, content = ?
-            WHERE id = ?
-        """, (title, content, chapter_id))
+        if content_html is None:
+            conn.execute("""
+                UPDATE chapters SET title = ?, content = ?
+                WHERE id = ?
+            """, (title, content, chapter_id))
+        else:
+            conn.execute("""
+                UPDATE chapters SET title = ?, content = ?, content_html = ?
+                WHERE id = ?
+            """, (title, content, content_html, chapter_id))
 
 
 # =========================
@@ -232,7 +244,8 @@ class RecordDialog(QDialog):
     def __init__(self, parent, title, name="", details="", category=None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(520, 430)
+        self.resize(760, 620)
+        self.setMinimumSize(650, 500)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -380,17 +393,98 @@ class NopAI(QMainWindow):
         center_layout.addLayout(header)
 
         toolbar = QHBoxLayout()
-        for label in ["Normal ▾", "B", "I", "U", "☷", "☰", "↗"]:
-            b = QPushButton(label)
-            b.setMaximumWidth(70)
-            toolbar.addWidget(b)
-        toolbar.addStretch()
+        toolbar.setSpacing(3)
+        toolbar.setContentsMargins(0, 2, 0, 4)
+        self.format_buttons = {}
+        for key, label, tooltip in [
+            ("bold", "B", "Tebal (Ctrl+B)"),
+            ("italic", "I", "Miring (Ctrl+I)"),
+            ("underline", "U", "Garis bawah (Ctrl+U)"),
+            ("strike", "S̶", "Coret"),
+            ("bullet", "•", "Daftar bullet"),
+            ("number", "1.", "Daftar bernomor"),
+        ]:
+            button = QPushButton(label)
+            button.setToolTip(tooltip)
+            button.setCheckable(True)
+            # Compact Word-style toolbar buttons, especially the list controls.
+            button.setFixedSize(24, 24)
+            button.setStyleSheet("QPushButton { padding: 0px; margin: 0px; border-radius: 4px; font-size: 12px; }")
+            button.setProperty("formatKey", key)
+            button.clicked.connect(lambda checked=False, k=key: self.apply_format(k))
+            self.format_buttons[key] = button
+            toolbar.addWidget(button)
+
+        separator = QLabel("│")
+        separator.setObjectName("muted")
+        toolbar.addWidget(separator)
+        self.alignment_buttons = {}
+        for key, label, tooltip in [
+            ("left", "≡", "Rata kiri"),
+            ("center", "☰", "Rata tengah"),
+            ("right", "≡→", "Rata kanan"),
+            ("justify", "☷", "Rata kiri-kanan"),
+        ]:
+            button = QPushButton(label)
+            button.setToolTip(tooltip)
+            button.setCheckable(True)
+            button.setFixedSize(24, 24)
+            button.setStyleSheet("QPushButton { padding: 0px; margin: 0px; border-radius: 4px; font-size: 11px; }")
+            button.clicked.connect(lambda checked=False, k=key: self.apply_alignment(k))
+            self.alignment_buttons[key] = button
+            toolbar.addWidget(button)
+
+        font_label = QLabel("Font")
+        font_label.setStyleSheet("font-size: 11px; padding: 0px;")
+        toolbar.addWidget(font_label)
+        self.font_family_combo = QComboBox()
+        # Daftar font umum yang relatif konsisten tersedia di Windows.
+        # Menghindari enumerasi font legacy yang memicu warning DirectWrite.
+        self.font_family_combo.addItems([
+            "Arial", "Calibri", "Cambria", "Georgia", "Times New Roman",
+            "Verdana", "Tahoma", "Trebuchet MS", "Segoe UI", "Consolas",
+            "Courier New"
+        ])
+        self.font_family_combo.setCurrentText("Arial")
+        self.font_family_combo.setFixedWidth(120)
+        self.font_family_combo.setFixedHeight(24)
+        self.font_family_combo.setStyleSheet("QComboBox { padding: 1px 3px; font-size: 11px; }")
+        self.font_family_combo.setToolTip("Pilih jenis huruf")
+        self.font_family_combo.currentTextChanged.connect(self.apply_font_family)
+        toolbar.addWidget(self.font_family_combo)
+
+        size_label = QLabel("Uk.")
+        size_label.setStyleSheet("font-size: 11px; padding: 0px;")
+        toolbar.addWidget(size_label)
+        self.font_size_combo = QComboBox()
+        self.font_size_combo.setEditable(True)
+        self.font_size_combo.setFixedWidth(46)
+        self.font_size_combo.setFixedHeight(24)
+        self.font_size_combo.setStyleSheet("QComboBox { padding: 1px 2px; font-size: 11px; }")
+        self.font_size_combo.addItems(["8", "9", "10", "11", "12", "14", "16", "18", "20", "22", "24", "26", "28", "36", "48", "72"])
+        self.font_size_combo.setCurrentText("12")
+        self.font_size_combo.setToolTip("Ukuran font (pt). Pilih atau ketik ukuran lalu tekan Enter")
+        self.font_size_combo.activated.connect(self.apply_font_size)
+        self.font_size_combo.lineEdit().returnPressed.connect(self.apply_font_size)
+        toolbar.addWidget(self.font_size_combo)
+        toolbar.addStretch(1)
         center_layout.addLayout(toolbar)
 
         self.editor = QTextEdit()
-        self.editor.setPlaceholderText("Mulai menulis novelmu di sini...")
+        self.editor.setAcceptRichText(True)
+        self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        
         self.editor.textChanged.connect(self.update_word_count)
+        self.editor.cursorPositionChanged.connect(self.update_format_indicators)
+        self.editor.selectionChanged.connect(self.update_format_indicators)
+        self.editor.setTabChangesFocus(False)
         center_layout.addWidget(self.editor, 1)
+
+        # Familiar Word shortcuts for paragraph alignment.
+        QShortcut(QKeySequence("Ctrl+L"), self.editor, activated=lambda: self.apply_alignment("left"))
+        QShortcut(QKeySequence("Ctrl+E"), self.editor, activated=lambda: self.apply_alignment("center"))
+        QShortcut(QKeySequence("Ctrl+R"), self.editor, activated=lambda: self.apply_alignment("right"))
+        QShortcut(QKeySequence("Ctrl+J"), self.editor, activated=lambda: self.apply_alignment("justify"))
         footer = QHBoxLayout()
         self.word_label = QLabel("0 kata")
         self.word_label.setObjectName("muted")
@@ -446,7 +540,7 @@ class NopAI(QMainWindow):
         context_title = QLabel("KONTEKS CEPAT")
         context_title.setObjectName("heading")
         context_layout.addWidget(context_title)
-        context_layout.addWidget(QLabel("Karakter  · klik kanan untuk opsi"))
+        context_layout.addWidget(QLabel("Karakter"))
         self.character_list = QListWidget()
         self.character_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.character_list.customContextMenuRequested.connect(lambda pos: self.show_record_menu("characters", self.character_list, pos))
@@ -455,7 +549,7 @@ class NopAI(QMainWindow):
         add_char = QPushButton("＋ Tambah Karakter")
         add_char.clicked.connect(lambda: self.add_record("characters"))
         context_layout.addWidget(add_char)
-        context_layout.addWidget(QLabel("Latar & Power System"))
+        context_layout.addWidget(QLabel("Latar"))
         self.world_list = QListWidget()
         self.world_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.world_list.customContextMenuRequested.connect(lambda pos: self.show_record_menu("worldbuilding", self.world_list, pos))
@@ -467,9 +561,9 @@ class NopAI(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(center)
-        splitter.addWidget(ai_panel)
         splitter.addWidget(context_panel)
-        splitter.setSizes([600, 340, 250])
+        splitter.addWidget(ai_panel)
+        splitter.setSizes([600, 300, 340])
 
         root_layout.addWidget(sidebar)
         root_layout.addWidget(splitter, 1)
@@ -783,7 +877,7 @@ class NopAI(QMainWindow):
 
         with db() as conn:
             row = conn.execute("""
-                SELECT title, content FROM chapters
+                SELECT title, content, content_html FROM chapters
                 WHERE id = ? AND project_id = ?
             """, (chapter_id, self.project_id)).fetchone()
 
@@ -791,11 +885,15 @@ class NopAI(QMainWindow):
             return
 
         self.chapter_id = chapter_id
-        self.chapter_title, content = row
+        self.chapter_title, content, content_html = row
 
         self.loading = True
-        self.editor.setPlainText(content)
+        if content_html:
+            self.editor.setHtml(content_html)
+        else:
+            self.editor.setPlainText(content or "")
         self.loading = False
+        self.update_format_indicators()
 
         self.chapter_heading.setText(self.chapter_title)
         self.update_word_count()
@@ -891,12 +989,140 @@ class NopAI(QMainWindow):
             save_chapter(
                 self.chapter_id,
                 self.chapter_title,
-                self.editor.toPlainText()
+                self.editor.toPlainText(),
+                self.editor.toHtml()
             )
             self.save_label.setText("● Tersimpan lokal")
         except sqlite3.Error as error:
             self.save_label.setText("● Gagal menyimpan")
             print("Database error:", error)
+
+    def apply_format(self, key):
+        """Apply rich-text formatting to the selection or current typing position."""
+        if key in ("bold", "italic", "underline", "strike"):
+            fmt = QTextCharFormat()
+            if key == "bold":
+                fmt.setFontWeight(700 if self.format_buttons[key].isChecked() else 400)
+            elif key == "italic":
+                fmt.setFontItalic(self.format_buttons[key].isChecked())
+            elif key == "underline":
+                fmt.setFontUnderline(self.format_buttons[key].isChecked())
+            elif key == "strike":
+                fmt.setFontStrikeOut(self.format_buttons[key].isChecked())
+            self.editor.mergeCurrentCharFormat(fmt)
+        elif key in ("bullet", "number"):
+            cursor = self.editor.textCursor()
+            current_list = cursor.currentList()
+            want_checked = self.format_buttons[key].isChecked()
+            if current_list is not None and not want_checked:
+                current_list.remove(cursor.block())
+            else:
+                list_format = QTextListFormat()
+                list_format.setStyle(
+                    QTextListFormat.Style.ListDisc if key == "bullet"
+                    else QTextListFormat.Style.ListDecimal
+                )
+                cursor.createList(list_format)
+            self.editor.setTextCursor(cursor)
+        self.update_format_indicators()
+        self.editor.setFocus()
+
+    def apply_alignment(self, key):
+        alignments = {
+            "left": Qt.AlignmentFlag.AlignLeft,
+            "center": Qt.AlignmentFlag.AlignHCenter,
+            "right": Qt.AlignmentFlag.AlignRight,
+            "justify": Qt.AlignmentFlag.AlignJustify,
+        }
+        alignment = alignments.get(key)
+        if alignment is not None:
+            self.editor.setAlignment(alignment)
+        self.update_format_indicators()
+        self.editor.setFocus()
+
+    def apply_font_family(self, family):
+        """Apply the selected font family to selected text or future typing."""
+        if not family or not hasattr(self, "editor") or getattr(self, "loading", False):
+            return
+        fmt = QTextCharFormat()
+        fmt.setFont(QFont(family))
+        self.editor.mergeCurrentCharFormat(fmt)
+        self.editor.setFocus()
+
+    def apply_font_size(self, *_):
+        raw_size = self.font_size_combo.currentText().strip()
+        try:
+            size = float(raw_size)
+            if not 6 <= size <= 200:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "Ukuran font tidak valid", "Masukkan ukuran font antara 6 sampai 200 pt.")
+            self.update_format_indicators()
+            self.editor.setFocus()
+            return
+        fmt = QTextCharFormat()
+        fmt.setFontPointSize(size)
+        self.editor.mergeCurrentCharFormat(fmt)
+        self.update_format_indicators()
+        self.editor.setFocus()
+
+    def update_format_indicators(self):
+        if not hasattr(self, "format_buttons") or not hasattr(self, "editor"):
+            return
+        fmt = self.editor.currentCharFormat()
+        cursor = self.editor.textCursor()
+        current_list = cursor.currentList()
+        states = {
+            "bold": fmt.fontWeight() >= 600,
+            "italic": fmt.fontItalic(),
+            "underline": fmt.fontUnderline(),
+            "strike": fmt.fontStrikeOut(),
+            "bullet": current_list is not None and current_list.format().style() == QTextListFormat.Style.ListDisc,
+            "number": current_list is not None and current_list.format().style() == QTextListFormat.Style.ListDecimal,
+        }
+        for key, button in self.format_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(states.get(key, False))
+            button.blockSignals(False)
+
+        if hasattr(self, "alignment_buttons"):
+            alignment = cursor.blockFormat().alignment()
+            align_states = {
+                "left": bool(alignment & Qt.AlignmentFlag.AlignLeft),
+                "center": bool(alignment & Qt.AlignmentFlag.AlignHCenter),
+                "right": bool(alignment & Qt.AlignmentFlag.AlignRight),
+                "justify": bool(alignment & Qt.AlignmentFlag.AlignJustify),
+            }
+            # Qt may report a default/zero alignment for a left-aligned paragraph.
+            if not any(align_states.values()):
+                align_states["left"] = True
+            for key, button in self.alignment_buttons.items():
+                button.blockSignals(True)
+                button.setChecked(align_states[key])
+                button.blockSignals(False)
+
+        if hasattr(self, "font_family_combo"):
+            # Read the font through QFont instead of the deprecated
+            # QTextCharFormat.fontFamily() API. Avoid resetting the native
+            # font combo on every cursor movement when the selection is unchanged.
+            family = fmt.font().family()
+            if family and self.font_family_combo.findText(family) >= 0 and self.font_family_combo.currentText() != family:
+                self.font_family_combo.blockSignals(True)
+                try:
+                    self.font_family_combo.setCurrentText(family)
+                finally:
+                    self.font_family_combo.blockSignals(False)
+
+        if hasattr(self, "font_size_combo"):
+            size = fmt.fontPointSize()
+            if size > 0:
+                size_text = str(int(size) if float(size).is_integer() else size)
+                if self.font_size_combo.currentText() != size_text:
+                    self.font_size_combo.blockSignals(True)
+                    try:
+                        self.font_size_combo.setCurrentText(size_text)
+                    finally:
+                        self.font_size_combo.blockSignals(False)
 
     def update_word_count(self):
         text = self.editor.toPlainText().strip()
@@ -915,20 +1141,38 @@ class NopAI(QMainWindow):
         with db() as conn:
             chars = conn.execute("SELECT id, name, details FROM characters WHERE project_id = ? ORDER BY name", (self.project_id,)).fetchall()
             worlds = conn.execute("SELECT id, name, category, details FROM worldbuilding WHERE project_id = ? ORDER BY category, name", (self.project_id,)).fetchall()
+        # Panel kanan hanya menampilkan nama. Detail lengkap dibuka di halaman editor.
         for record_id, name, details in chars:
-            item = QListWidgetItem(name + ("\n" + details[:70] if details else ""))
+            item = QListWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, record_id)
-            item.setToolTip(details)
+            item.setToolTip("Klik dua kali untuk membuka halaman karakter")
             self.character_list.addItem(item)
+
+        # Kelompokkan latar berdasarkan kategori supaya daftar panjang tetap rapi.
+        current_category = None
         for record_id, name, category, details in worlds:
-            item = QListWidgetItem(f"{name}\n[{category}]" + (f" — {details[:55]}" if details else ""))
+            if category != current_category:
+                current_category = category
+                header = QListWidgetItem(category.upper())
+                header.setFlags(Qt.ItemFlag.NoItemFlags)
+                header.setData(Qt.ItemDataRole.UserRole, None)
+                # Header kategori dibuat lebih terang dan diberi latar tipis
+                # agar mudah dibedakan dari nama latar biasa.
+                header.setForeground(QColor("#8AB4F8"))
+                header.setBackground(QColor("#303744"))
+                font = header.font()
+                font.setBold(True)
+                font.setPointSize(max(font.pointSize(), 10))
+                header.setFont(font)
+                self.world_list.addItem(header)
+            item = QListWidgetItem("   " + name)
             item.setData(Qt.ItemDataRole.UserRole, record_id)
-            item.setToolTip(details)
+            item.setToolTip("Klik dua kali untuk membuka halaman latar")
             self.world_list.addItem(item)
 
     def add_record(self, kind):
         is_character = kind == "characters"
-        heading = "Karakter" if is_character else "Latar / Power System"
+        heading = "Karakter" if is_character else "Latar"
         dialog = RecordDialog(self, f"Tambah {heading}", category=None if is_character else "Lore")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -947,6 +1191,8 @@ class NopAI(QMainWindow):
         if item is None:
             return
         record_id = item.data(Qt.ItemDataRole.UserRole)
+        if record_id is None:
+            return
         is_character = kind == "characters"
         with db() as conn:
             if is_character:
@@ -957,7 +1203,7 @@ class NopAI(QMainWindow):
                 category = row[2] if row else "Lore"
         if not row:
             return
-        dialog = RecordDialog(self, "Edit data", row[0], row[1], category)
+        dialog = RecordDialog(self, f"Halaman {'Karakter' if is_character else 'Latar'}: {row[0]}", row[0], row[1], category)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name, details, new_category = dialog.values()
@@ -973,6 +1219,8 @@ class NopAI(QMainWindow):
 
     def show_record_menu(self, kind, widget, pos):
         item = widget.itemAt(pos)
+        if item is not None and item.data(Qt.ItemDataRole.UserRole) is None:
+            item = None
         menu = QMenu(self)
         add_action = menu.addAction("＋ Tambah data")
         edit_action = menu.addAction("✎ Edit / Lihat")
@@ -1140,6 +1388,12 @@ class NopAI(QMainWindow):
             QPushButton#navButton { text-align: left; background-color: transparent; border-color: transparent; }
             QPushButton:hover {
                 background-color: #29385c;
+            }
+            QPushButton:checked {
+                background-color: #5267a5;
+                border: 1px solid #8da6ff;
+                color: #ffffff;
+                font-weight: bold;
             }
             QPushButton#primary {
                 background-color: #6654ce;
