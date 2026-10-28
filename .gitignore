@@ -4,30 +4,35 @@
 
 # Python virtual environment
 .venv/
+venv/
+env/
 
-# Application logs
-nopai.log
-nopai_error.log
-*.log
+# Backup versi lama (tetap ada di laptop, tidak di-upload)
+Backup/
 
-# Database and local data
+# Database dan data lokal
 data/
 *.db
 *.sqlite
 *.sqlite3
 
-# Novel files (personal writing)
+# File novel pribadi
 novels/
+
+# Log aplikasi
+*.log
+nopai.log
+nopai_error.log
 
 # Python cache
 __pycache__/
 *.py[cod]
 
-# Temporary files
+# File sementara
 *.tmp
 *.bak
 .DS_Store
 Thumbs.db
 
-# Environment variables
+# Environment variables dan secrets
 .env
