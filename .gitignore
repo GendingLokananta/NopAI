@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Database lokal berisi data novel
+data/nopai.db
+data/nopai.db-journal
+data/nopai.db-wal
+data/nopai.db-shm
+
+# File editor
+.vscode/
+.idea/
+
+# Log
+*.log
