@@ -1,132 +1,136 @@
 # NopAI
 
-Aplikasi desktop untuk membantu menulis novel dengan Python, PySide6, SQLite, dan Ollama. NopAI mendukung pengelolaan novel, bab, karakter, lore/worldbuilding, bantuan AI lokal, serta ekspor naskah ke Word (`.docx`).
+NopAI adalah aplikasi desktop untuk membantu proses penulisan novel menggunakan Python, PySide6, SQLite, dan Ollama. Aplikasi ini mendukung pengelolaan proyek novel, bab, karakter, lore/worldbuilding, bantuan penulisan berbasis AI lokal, serta ekspor naskah ke Microsoft Word.
 
 ## Fitur
 
 - Mengelola beberapa proyek novel.
 - Menulis dan mengatur bab.
-- Menyimpan data karakter dan lore/worldbuilding.
-- Bantuan penulisan menggunakan AI lokal melalui Ollama.
-- Mengekspor novel beserta bab, karakter, dan lore ke dokumen Word.
-- Penyimpanan lokal menggunakan SQLite.
+- Menyimpan informasi karakter dan lore/worldbuilding.
+- Mendapatkan bantuan penulisan menggunakan AI lokal.
+- Mengekspor novel, bab, karakter, dan lore ke dokumen Word (`.docx`).
+- Menyimpan data secara lokal menggunakan SQLite.
 
 ## Persyaratan
 
-- Windows 10/11 (panduan ini menggunakan Windows Command Prompt/PowerShell).
+- Windows 10/11.
 - Python 3.10 atau lebih baru.
-- Git untuk meng-clone repository.
-- Ollama untuk menggunakan fitur AI.
+- Git (opsional, jika ingin meng-clone repository).
+- Ollama (untuk menggunakan fitur AI).
 
-## 1. Unduh project
+## 1. Unduh Project
 
-Pastikan Git sudah terpasang, lalu jalankan:
+Clone repository menggunakan Git:
 
 ```powershell
 git clone https://github.com/GendingLokananta/NopAI.git
 cd NopAI
 ```
 
-Kalau tidak ingin menggunakan Git, buka repository GitHub lalu pilih **Code → Download ZIP**, ekstrak ZIP, kemudian buka terminal di folder project tersebut.
+Atau unduh ZIP melalui halaman repository GitHub, kemudian ekstrak ke folder yang diinginkan.
 
-## 2. Buat virtual environment
+## 2. Buat Virtual Environment
 
-Virtual environment (`venv`) memisahkan paket Python NopAI dari paket Python project lain di komputer. Jalankan dari folder NopAI:
+Jalankan perintah berikut di folder project:
 
 ```powershell
 py -m venv .venv
 ```
 
-Aktifkan virtual environment:
+Virtual environment berfungsi untuk memisahkan dependency NopAI dari project Python lainnya.
+
+## 3. Pasang Dependency
+
+Aktifkan virtual environment menggunakan PowerShell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-Jika menggunakan Command Prompt (`cmd.exe`), gunakan:
+Jika menggunakan Command Prompt:
 
 ```cmd
 .venv\Scripts\activate.bat
 ```
 
-Jika PowerShell menolak aktivasi karena kebijakan skrip, kamu tetap bisa memasang paket dan menjalankan aplikasi dengan interpreter virtual environment secara langsung, seperti pada langkah berikutnya. Tidak perlu mengubah kebijakan keamanan Windows hanya untuk menjalankan NopAI.
-
-## 3. Pasang dependency
-
-Dengan virtual environment aktif, jalankan:
+Kemudian pasang dependency:
 
 ```powershell
 python -m pip install --upgrade pip
-python -m pip install PySide6 requests python-docx
+python -m pip install -r requirements.txt
 ```
 
-Paket yang digunakan:
+Jika aktivasi virtual environment gagal, kamu bisa langsung menggunakan interpreter di dalam `.venv`:
 
-- `PySide6` — antarmuka desktop.
-- `requests` — komunikasi dengan Ollama.
-- `python-docx` — ekspor dokumen Word.
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
 
-Modul `sqlite3` sudah termasuk dalam instalasi standar Python, jadi tidak perlu dipasang terpisah.
+## 4. Siapkan Ollama
 
-## 4. Pasang dan siapkan Ollama (untuk fitur AI)
+Ollama diperlukan untuk menggunakan fitur AI lokal.
 
-1. Unduh dan pasang Ollama dari situs resminya: https://ollama.com/download
-2. Pastikan Ollama berjalan.
-3. Buka terminal, lalu unduh model yang dipakai NopAI:
+1. Unduh Ollama dari [situs resminya](https://ollama.com/download).
+2. Pastikan Ollama sudah terpasang dan berjalan.
+3. Unduh model yang digunakan NopAI:
 
-   ```powershell
-   ollama pull llama3.2:3b
-   ```
+```powershell
+ollama pull llama3.2:3b
+```
 
-NopAI menghubungi Ollama di `http://localhost:11434`. Jika Ollama tidak berjalan atau model belum diunduh, aplikasi masih dapat digunakan untuk menulis dan mengelola data, tetapi fitur AI tidak akan merespons.
+NopAI menggunakan endpoint lokal `http://localhost:11434`. Tanpa Ollama atau model yang diperlukan, fitur AI tidak akan berfungsi, tetapi fitur penulisan dan pengelolaan data tetap dapat digunakan.
 
 ## 5. Jalankan NopAI
 
-Pastikan terminal berada di folder project. Jika virtual environment sudah aktif:
+Dengan virtual environment aktif, jalankan:
 
 ```powershell
 python main.py
 ```
 
-Atau tanpa mengaktifkan virtual environment:
+Atau jalankan langsung menggunakan interpreter virtual environment:
 
 ```powershell
 .\.venv\Scripts\python.exe main.py
 ```
 
-## 6. Buka dengan klik dua kali (Windows)
+## 6. Menjalankan dengan File BAT
 
-Jika file `Buka_NopAI.bat` tersedia di repository, simpan file tersebut di folder yang sama dengan `main.py` dan `.venv`. Setelah setup selesai, klik dua kali `Buka_NopAI.bat` untuk membuka aplikasi.
+Jika file `NopAI.bat` tersedia, kamu bisa menjalankannya dengan klik dua kali setelah dependency selesai dipasang.
 
-## Data dan privasi
+Pastikan file BAT tersebut sesuai dengan struktur folder dan konfigurasi Python di komputer yang digunakan.
 
-Database lokal dibuat otomatis di `data/nopai.db` saat aplikasi dijalankan. Database tersebut menyimpan proyek dan isi novel di komputer pengguna. **Jangan commit atau mengunggah database yang berisi tulisan pribadi ke repository publik.** Pastikan `data/nopai.db` sudah tercantum di `.gitignore` sebelum menjalankan `git add .`.
+## Data dan Privasi
 
-Virtual environment (`.venv`) juga tidak perlu diunggah ke GitHub. Setiap pengguna membuat `.venv` sendiri mengikuti panduan di atas.
+NopAI menyimpan data proyek novel secara lokal menggunakan SQLite. Database dibuat di `data/nopai.db` saat aplikasi dijalankan.
+
+Database, naskah novel pribadi, log, dan file lokal yang bersifat pribadi sebaiknya tidak diunggah ke repository publik.
+
+Virtual environment `.venv` juga tidak perlu diunggah ke GitHub. Setiap pengguna dapat membuatnya sendiri mengikuti panduan instalasi di atas.
 
 ## Troubleshooting
 
-### `py` atau `python` tidak dikenali
+### Python tidak dikenali
 
-Pasang Python dari https://www.python.org/downloads/ lalu pastikan Python Launcher/Python tersedia di PATH. Tutup dan buka kembali terminal setelah instalasi.
+Pasang Python dari [python.org](https://www.python.org/downloads/), lalu pastikan Python tersedia melalui PATH. Buka kembali terminal setelah instalasi.
 
-### Modul seperti `PySide6` atau `docx` tidak ditemukan
+### Dependency tidak ditemukan
 
-Pastikan dependency dipasang menggunakan Python dari virtual environment:
+Pasang ulang dependency menggunakan interpreter virtual environment:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install PySide6 requests python-docx
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-### AI tidak bisa terhubung
+### AI tidak dapat terhubung
 
 - Pastikan Ollama sudah terpasang dan berjalan.
 - Jalankan `ollama pull llama3.2:3b`.
-- Coba `ollama list` untuk memastikan model tersedia.
+- Jalankan `ollama list` untuk memastikan model tersedia.
 
 ### Ekspor Word gagal
 
-Pasang ulang dependency ekspor:
+Pasang dependency `python-docx`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install python-docx
@@ -138,4 +142,5 @@ Pasang ulang dependency ekspor:
 - PySide6 / Qt
 - SQLite
 - Ollama (`llama3.2:3b`)
+- Requests
 - python-docx
