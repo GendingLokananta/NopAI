@@ -1,146 +1,183 @@
-# NopAI
+# Stomake
 
-NopAI adalah aplikasi desktop untuk membantu proses penulisan novel menggunakan Python, PySide6, SQLite, dan Ollama. Aplikasi ini mendukung pengelolaan proyek novel, bab, karakter, lore/worldbuilding, bantuan penulisan berbasis AI lokal, serta ekspor naskah ke Microsoft Word.
+**Stomake** adalah aplikasi desktop untuk membantu penulis mengelola dan menulis novel dalam satu tempat. Aplikasi ini menyediakan fitur pengelolaan proyek, penulisan bab, database karakter, Story Bible, World Bible, serta integrasi AI lokal untuk mendukung proses kreatif.
 
-## Fitur
+## ✨ Fitur Utama
 
-- Mengelola beberapa proyek novel.
-- Menulis dan mengatur bab.
-- Menyimpan informasi karakter dan lore/worldbuilding.
-- Mendapatkan bantuan penulisan menggunakan AI lokal.
-- Mengekspor novel, bab, karakter, dan lore ke dokumen Word (`.docx`).
-- Menyimpan data secara lokal menggunakan SQLite.
+- **Project Management** — Mengelola proyek novel dan bab cerita.
+- **Character Database** — Menyimpan informasi dan detail karakter.
+- **Story Bible** — Mengelola informasi penting mengenai alur dan elemen cerita.
+- **World Bible** — Menyimpan informasi tentang dunia, lokasi, dan elemen pendukung cerita.
+- **Custom Categories** — Membuat kategori khusus untuk Story Bible dan World Bible.
+- **Custom Traits** — Menyesuaikan atribut karakter sesuai kebutuhan.
+- **Rich Text Editor** — Menulis dan memformat teks cerita.
+- **Local AI Integration** — Menggunakan AI lokal melalui Ollama.
+- **Word Export** — Mengekspor tulisan ke dokumen Word.
+- **SQLite Database** — Menyimpan data aplikasi secara lokal.
 
-## Persyaratan
+## 🖥️ Persyaratan Sistem
 
-- Windows 10/11.
-- Python 3.10 atau lebih baru.
-- Git (opsional, jika ingin meng-clone repository).
-- Ollama (untuk menggunakan fitur AI).
+- Windows 10 atau Windows 11
+- Python 3.10 atau lebih baru
+- Git
+- Ollama untuk menggunakan fitur AI lokal
 
-## 1. Unduh Project
+## 📥 Instalasi
 
-Clone repository menggunakan Git:
+### 1. Clone Repository
 
-```powershell
-git clone https://github.com/GendingLokananta/NopAI.git
-cd NopAI
+Unduh source code Stomake dari GitHub:
+
+```bash
+git clone https://github.com/GendingLokananta/Stomake.git
+cd Stomake
 ```
 
-Atau unduh ZIP melalui halaman repository GitHub, kemudian ekstrak ke folder yang diinginkan.
+### 2. Buat Virtual Environment
 
-## 2. Buat Virtual Environment
+Buat lingkungan Python terpisah untuk mengelola dependencies aplikasi:
 
-Jalankan perintah berikut di folder project:
-
-```powershell
-py -m venv .venv
+```bash
+python -m venv .venv
 ```
 
-Virtual environment berfungsi untuk memisahkan dependency NopAI dari project Python lainnya.
+### 3. Aktifkan Virtual Environment
 
-## 3. Pasang Dependency
+**Windows CMD:**
 
-Aktifkan virtual environment menggunakan PowerShell:
+```bat
+.venv\Scripts\activate
+```
+
+**Windows PowerShell:**
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-Jika menggunakan Command Prompt:
+### 4. Instal Dependencies
 
-```cmd
-.venv\Scripts\activate.bat
-```
+Pastikan file `requirements.txt` tersedia di direktori utama proyek.
 
-Kemudian pasang dependency:
-
-```powershell
+```bash
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
-Jika aktivasi virtual environment gagal, kamu bisa langsung menggunakan interpreter di dalam `.venv`:
+### 5. Jalankan Aplikasi
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
+Jalankan aplikasi menggunakan file utama `main.py`:
 
-## 4. Siapkan Ollama
-
-Ollama diperlukan untuk menggunakan fitur AI lokal.
-
-1. Unduh Ollama dari [situs resminya](https://ollama.com/download).
-2. Pastikan Ollama sudah terpasang dan berjalan.
-3. Unduh model yang digunakan NopAI:
-
-```powershell
-ollama pull llama3.2:3b
-```
-
-NopAI menggunakan endpoint lokal `http://localhost:11434`. Tanpa Ollama atau model yang diperlukan, fitur AI tidak akan berfungsi, tetapi fitur penulisan dan pengelolaan data tetap dapat digunakan.
-
-## 5. Jalankan NopAI
-
-Dengan virtual environment aktif, jalankan:
-
-```powershell
+```bash
 python main.py
 ```
 
-Atau jalankan langsung menggunakan interpreter virtual environment:
+## 🤖 Integrasi AI Lokal
 
-```powershell
-.\.venv\Scripts\python.exe main.py
+Stomake mendukung penggunaan AI lokal melalui Ollama.
+
+### Cara Menggunakan
+
+1. Unduh dan instal Ollama dari situs resminya: https://ollama.com/
+2. Pastikan Ollama berjalan di komputer.
+3. Unduh model AI yang ingin digunakan.
+4. Jalankan Stomake dan gunakan fitur AI yang tersedia.
+
+Contoh perintah untuk mengunduh model:
+
+```bash
+ollama pull llama3.2:3b
 ```
 
-## 6. Menjalankan dengan File BAT
+Model yang digunakan dapat disesuaikan dengan konfigurasi aplikasi dan kemampuan perangkat.
 
-Jika file `NopAI.bat` tersedia, kamu bisa menjalankannya dengan klik dua kali setelah dependency selesai dipasang.
+**Catatan:** Ketersediaan fitur AI bergantung pada konfigurasi dan model yang didukung oleh aplikasi.
 
-Pastikan file BAT tersebut sesuai dengan struktur folder dan konfigurasi Python di komputer yang digunakan.
+## 🚀 Menjalankan dengan File BAT
 
-## Data dan Privasi
+Untuk mempermudah proses menjalankan aplikasi di Windows, kamu dapat membuat file `run_stomake.bat` di direktori utama proyek.
 
-NopAI menyimpan data proyek novel secara lokal menggunakan SQLite. Database dibuat di `data/nopai.db` saat aplikasi dijalankan.
+Isi file:
 
-Database, naskah novel pribadi, log, dan file lokal yang bersifat pribadi sebaiknya tidak diunggah ke repository publik.
+```bat
+@echo off
+cd /d "%~dp0"
 
-Virtual environment `.venv` juga tidak perlu diunggah ke GitHub. Setiap pengguna dapat membuatnya sendiri mengikuti panduan instalasi di atas.
+if not exist ".venv\Scripts\python.exe" (
+    echo Virtual environment tidak ditemukan.
+    echo Silakan buat .venv dan instal requirements terlebih dahulu.
+    pause
+    exit /b 1
+)
 
-## Troubleshooting
+".venv\Scripts\python.exe" main.py
 
-### Python tidak dikenali
-
-Pasang Python dari [python.org](https://www.python.org/downloads/), lalu pastikan Python tersedia melalui PATH. Buka kembali terminal setelah instalasi.
-
-### Dependency tidak ditemukan
-
-Pasang ulang dependency menggunakan interpreter virtual environment:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+pause
 ```
 
-### AI tidak dapat terhubung
+Setelah disimpan, klik dua kali file `run_stomake.bat` untuk menjalankan aplikasi.
 
-- Pastikan Ollama sudah terpasang dan berjalan.
-- Jalankan `ollama pull llama3.2:3b`.
-- Jalankan `ollama list` untuk memastikan model tersedia.
+## 💾 Penyimpanan Data
 
-### Ekspor Word gagal
+Stomake menggunakan SQLite sebagai sistem penyimpanan data lokal.
 
-Pasang dependency `python-docx`:
+Database utama aplikasi berada di:
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install python-docx
+```text
+data/Stomake.db
 ```
 
-## Teknologi
+**Penting:** Selalu buat cadangan database sebelum memperbarui aplikasi, mengubah struktur database, atau melakukan migrasi data.
 
-- Python
-- PySide6 / Qt
-- SQLite
-- Ollama (`llama3.2:3b`)
-- Requests
-- python-docx
+## 📁 Struktur Proyek
+
+Gambaran umum struktur proyek:
+
+```text
+Stomake/
+├── main.py
+├── requirements.txt
+├── README.md
+├── run_stomake.bat
+└── data/
+    └── Stomake.db
+```
+
+Struktur di atas merupakan gambaran umum. File dan folder aktual dapat berbeda sesuai implementasi aplikasi.
+
+## 🛠️ Troubleshooting
+
+### Aplikasi Tidak Bisa Dijalankan
+
+Pastikan Python sudah terinstal dan virtual environment telah diaktifkan.
+
+Jika dependencies belum terpasang, jalankan:
+
+```bash
+pip install -r requirements.txt
+```
+
+Kemudian jalankan kembali:
+
+```bash
+python main.py
+```
+
+### Fitur AI Tidak Berfungsi
+
+- Pastikan Ollama sudah terinstal.
+- Pastikan layanan Ollama berjalan.
+- Pastikan model AI yang dibutuhkan sudah diunduh.
+- Periksa konfigurasi integrasi AI pada aplikasi.
+
+### Database Bermasalah
+
+- Pastikan folder `data` tersedia.
+- Pastikan database dapat diakses oleh aplikasi.
+- Buat cadangan database sebelum mencoba memperbaiki atau mengganti file database.
+
+## 🔧 Pengembangan
+
+Stomake dikembangkan menggunakan Python dengan antarmuka desktop, penyimpanan SQLite, dan dukungan integrasi AI lokal.
+
+Pengembangan lebih lanjut dapat dilakukan dengan menambahkan fitur, menyempurnakan antarmuka, atau meningkatkan pengelolaan data cerita.

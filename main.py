@@ -1,5 +1,6 @@
 import sys
 import sqlite3
+import json
 from pathlib import Path
 
 import requests
@@ -11,20 +12,27 @@ from PySide6.QtWidgets import (
     QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout,
     QSplitter, QMessageBox, QInputDialog, QListWidget,
     QListWidgetItem, QComboBox, QDialog, QFormLayout,
-    QLineEdit, QDialogButtonBox, QMenu, QFileDialog, QStackedWidget
+    QLineEdit, QDialogButtonBox, QMenu, QFileDialog, QStackedWidget,
+    QTabWidget, QCheckBox
 )
 
 # =========================
 # CONFIGURATION
 # =========================
 
-APP_NAME = "NopAI"
+APP_NAME = "Stomake"
 MODEL_NAME = "llama3.2:3b"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-DB_PATH = DATA_DIR / "nopai.db"
+DB_PATH = DATA_DIR / "Stomake.db"
+LEGACY_DB_PATH = DATA_DIR / "nopai.db"
+
+# Preserve existing data by renaming the legacy database on first upgrade.
+# If Stomake.db already exists, leave both files untouched.
+if LEGACY_DB_PATH.exists() and not DB_PATH.exists():
+    LEGACY_DB_PATH.replace(DB_PATH)
 
 
 # =========================
@@ -69,7 +77,7 @@ def setup_database():
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )
         """)
-        # Upgrade databases created by older NopAI versions without losing data.
+        # Upgrade databases created by older Stomake versions without losing data.
         character_columns = {row[1] for row in conn.execute("PRAGMA table_info(characters)").fetchall()}
         if "role" not in character_columns:
             conn.execute("ALTER TABLE characters ADD COLUMN role TEXT NOT NULL DEFAULT 'Karakter Pendukung'")
@@ -84,12 +92,67 @@ def setup_database():
                 FOREIGN KEY(project_id) REFERENCES projects(id)
             )
         """)
-        # Keep compatibility with the first NopAI version.
+        # Keep compatibility with the first Stomake version.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS manuscript (
                 id INTEGER PRIMARY KEY,
                 title TEXT NOT NULL,
                 content TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS custom_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                section TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(section, name)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS custom_options (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL DEFAULT 0,
+                field_key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                UNIQUE(project_id, field_key, value)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS story_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            )
+        """)
+        # Extensible profile fields and connections for Story/World Bible.
+        story_record_columns = {row[1] for row in conn.execute("PRAGMA table_info(story_records)").fetchall()}
+        if "metadata" not in story_record_columns:
+            conn.execute("ALTER TABLE story_records ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}' ")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS story_record_chapters (
+                record_id INTEGER NOT NULL, chapter_id INTEGER NOT NULL,
+                PRIMARY KEY(record_id, chapter_id),
+                FOREIGN KEY(record_id) REFERENCES story_records(id) ON DELETE CASCADE,
+                FOREIGN KEY(chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS character_relationships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL, source_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL, relation TEXT NOT NULL DEFAULT 'Terhubung',
+                notes TEXT NOT NULL DEFAULT '',
+                UNIQUE(source_id, target_id, relation),
+                FOREIGN KEY(project_id) REFERENCES projects(id),
+                FOREIGN KEY(source_id) REFERENCES story_records(id) ON DELETE CASCADE,
+                FOREIGN KEY(target_id) REFERENCES story_records(id) ON DELETE CASCADE
             )
         """)
 
@@ -101,7 +164,7 @@ def setup_database():
             old = conn.execute(
                 "SELECT title, content FROM manuscript WHERE id = 1"
             ).fetchone()
-            title = old[0] if old else "Novel Pertamaku"
+            title = old[0] if old else "Cerita Pertamaku"
             content = old[1] if old else ""
             cur = conn.execute(
                 "INSERT INTO projects (title) VALUES (?)", (title,)
@@ -211,7 +274,7 @@ class AIWorker(QThread):
                         {
                             "role": "system",
                             "content": (
-                                "Kamu adalah NopAI, asisten penulis novel. "
+                                "Kamu adalah Stomake, asisten penulis cerita. "
                                 "Bantu mengembangkan cerita, menyunting prosa, "
                                 "dan menjaga konsistensi berdasarkan konteks "
                                 "yang diberikan. Jangan mengarang fakta sebagai "
@@ -246,67 +309,14 @@ class AIWorker(QThread):
 # RECORD EDITOR DIALOG
 # =========================
 
-class RecordDialog(QDialog):
-    def __init__(self, parent, title, name="", details="", category=None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.resize(760, 620)
-        self.setMinimumSize(650, 500)
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        self.name_input = QLineEdit(name)
-        self.details_input = QTextEdit()
-        self.details_input.setPlainText(details)
-        self.details_input.setPlaceholderText(
-            "Tuliskan detail, fakta, latar belakang, tujuan, rahasia, "
-            "aturan, atau informasi lain..."
-        )
-
-        form.addRow("Nama:", self.name_input)
-
-        self.category_input = None
-        if category is not None:
-            self.category_input = QComboBox()
-            self.category_input.addItems([
-                "Lokasi", "Power System", "Sejarah", "Budaya",
-                "Kerajaan", "Organisasi", "Makhluk", "Benda", "Lore"
-            ])
-            index = self.category_input.findText(category)
-            if index >= 0:
-                self.category_input.setCurrentIndex(index)
-            form.addRow("Kategori:", self.category_input)
-
-        layout.addLayout(form)
-        layout.addWidget(QLabel("Detail:"))
-        layout.addWidget(self.details_input, 1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def values(self):
-        return (
-            self.name_input.text().strip(),
-            self.details_input.toPlainText().strip(),
-            self.category_input.currentText()
-            if self.category_input else None
-        )
-
-
 # =========================
 # MAIN APPLICATION
 # =========================
 
-class NopAI(QMainWindow):
+class Stomake(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NopAI — Your Story, Smarter")
+        self.setWindowTitle("Stomake — Ruang Cerita Kreatif")
         self.resize(1450, 880)
         self.setMinimumSize(1000, 650)
 
@@ -345,22 +355,23 @@ class NopAI(QMainWindow):
 
         # Left navigation / project tree
         sidebar = QFrame()
+        self.sidebar = sidebar
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(235)
+        sidebar.setFixedWidth(250)
         side = QVBoxLayout(sidebar)
-        side.setContentsMargins(12, 16, 12, 12)
-        side.setSpacing(7)
+        side.setContentsMargins(16, 20, 16, 16)
+        side.setSpacing(9)
 
-        logo = QLabel("✦  NopAI")
+        logo = QLabel("✦  Stomake")
         logo.setObjectName("logo")
         side.addWidget(logo)
-        tagline = QLabel("Your Story, Smarter")
+        tagline = QLabel("Ruang Cerita Kreatif")
         tagline.setObjectName("muted")
         side.addWidget(tagline)
         side.addSpacing(12)
 
         side.addSpacing(12)
-        side.addWidget(QLabel("JUDUL SAYA"))
+        side.addWidget(QLabel("CERITA SAYA"))
         project_row = QHBoxLayout()
         self.project_combo = QComboBox()
         self.project_combo.currentIndexChanged.connect(self.on_project_changed)
@@ -374,15 +385,37 @@ class NopAI(QMainWindow):
         side.addLayout(project_row)
 
         side.addSpacing(8)
-        side.addWidget(QLabel("DAFTAR BAB"))
+        side.addWidget(QLabel("MANUSKRIP"))
         self.chapter_list = QListWidget()
         self.chapter_list.currentItemChanged.connect(self.on_chapter_changed)
         self.chapter_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.chapter_list.customContextMenuRequested.connect(self.show_chapter_menu)
-        side.addWidget(self.chapter_list, 1)
-        add_chapter = QPushButton("＋ Bab")
+        self.chapter_list.setMaximumHeight(145)
+        side.addWidget(self.chapter_list)
+        add_chapter = QPushButton("＋ Tambah Bab")
         add_chapter.clicked.connect(self.new_chapter)
         side.addWidget(add_chapter)
+
+        # Story/World Bible categories are user-defined to keep the sidebar clean.
+        side.addSpacing(5)
+        self.nav_buttons = {}
+        self.nav_section_layouts = {}
+        self.nav_section_widgets = {}
+        for section_key, section_title in (("story", "STORY BIBLE"), ("world", "WORLD BIBLE")):
+            section = QLabel(section_title)
+            section.setObjectName("sectionLabel")
+            side.addWidget(section)
+            self.nav_section_widgets[section_key] = section
+            self.nav_section_layouts[section_key] = side
+            if section_key == "world":
+                self.add_nav_entry("characters", "♙  Karakter", section_key)
+            add_category = QPushButton("＋ Tambah Kategori")
+            add_category.setObjectName("navButton")
+            add_category.clicked.connect(lambda checked=False, sec=section_key: self.add_custom_category(sec))
+            side.addWidget(add_category)
+            self.nav_section_widgets[section_key + "_add"] = add_category
+        self.load_custom_category_navigation(side)
+        side.addStretch(1)
         self.save_label = QLabel("● Siap")
         self.save_label.setObjectName("muted")
         side.addWidget(self.save_label)
@@ -390,19 +423,27 @@ class NopAI(QMainWindow):
         # Center editor
         center = QFrame()
         center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(12, 12, 12, 12)
-        center_layout.setSpacing(8)
+        center_layout.setContentsMargins(18, 16, 18, 14)
+        center_layout.setSpacing(12)
         header = QHBoxLayout()
-        self.chapter_heading = QLabel("Editor Novel")
+        self.chapter_heading = QLabel("Editor Cerita")
         self.chapter_heading.setObjectName("heading")
         header.addWidget(self.chapter_heading)
         header.addStretch()
-        export_button = QPushButton("⇩ Export Novel")
+        self.focus_button = QPushButton("◉ Fokus")
+        self.focus_button.setToolTip("Aktif/nonaktifkan Focus Writing (Ctrl+Shift+F)")
+        self.focus_button.clicked.connect(self.toggle_focus_mode)
+        header.addWidget(self.focus_button)
+        self.ai_toggle_button = QPushButton("Sembunyikan AI")
+        self.ai_toggle_button.setToolTip("Tampilkan atau sembunyikan AI Assistant (Ctrl+Shift+A)")
+        self.ai_toggle_button.clicked.connect(self.toggle_ai_panel)
+        header.addWidget(self.ai_toggle_button)
+        export_button = QPushButton("⇩ Export Cerita")
         export_button.clicked.connect(self.show_export_menu)
         header.addWidget(export_button)
         center_layout.addLayout(header)
 
-        # Area tengah memakai halaman bertumpuk: novel atau detail karakter/latar.
+        # Area tengah memakai halaman bertumpuk: cerita atau detail karakter/latar.
         self.center_stack = QStackedWidget()
         center_layout.addWidget(self.center_stack, 1)
         self.chapter_page = QWidget()
@@ -466,7 +507,26 @@ class NopAI(QMainWindow):
         self.font_family_combo.setCurrentText("Arial")
         self.font_family_combo.setFixedWidth(120)
         self.font_family_combo.setFixedHeight(24)
-        self.font_family_combo.setStyleSheet("QComboBox { padding: 1px 3px; font-size: 11px; }")
+        self.font_family_combo.setStyleSheet("""
+            QComboBox {
+                padding: 1px 22px 1px 6px;
+                font-size: 11px;
+                border-radius: 8px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: right center;
+                width: 18px;
+                margin: 2px;
+                border: 1px solid #555363;
+                border-radius: 9px;
+                background-color: #454552;
+            }
+            QComboBox::drop-down:hover {
+                background-color: #8170c9;
+                border-color: #b8a5ff;
+            }
+        """)
         self.font_family_combo.setToolTip("Pilih jenis huruf")
         self.font_family_combo.currentTextChanged.connect(self.apply_font_family)
         toolbar.addWidget(self.font_family_combo)
@@ -476,11 +536,53 @@ class NopAI(QMainWindow):
         toolbar.addWidget(size_label)
         self.font_size_combo = QComboBox()
         self.font_size_combo.setEditable(True)
-        self.font_size_combo.setFixedWidth(46)
+        self.font_size_combo.setFixedWidth(68)
         self.font_size_combo.setFixedHeight(24)
-        self.font_size_combo.setStyleSheet("QComboBox { padding: 1px 2px; font-size: 11px; }")
+        self.font_size_combo.setStyleSheet("""
+            QComboBox {
+                padding: 0px 22px 0px 5px;
+                font-size: 11px;
+                border-radius: 8px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: right center;
+                width: 18px;
+                margin: 2px;
+                border: 1px solid #555363;
+                border-radius: 9px;
+                background-color: #454552;
+            }
+            QComboBox::drop-down:hover {
+                background-color: #8170c9;
+                border-color: #b8a5ff;
+            }
+            QComboBox QLineEdit {
+                background-color: #30303b;
+                color: #ffffff;
+                border: none;
+                border-radius: 0px;
+                padding: 0px 2px;
+                margin: 0px;
+                min-width: 28px;
+                selection-background-color: #6654a8;
+                selection-color: #ffffff;
+            }
+            QComboBox QAbstractItemView {
+                padding: 4px;
+                border-radius: 9px;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 6px 8px;
+                border-radius: 6px;
+            }
+        """)
         self.font_size_combo.addItems(["8", "9", "10", "11", "12", "14", "16", "18", "20", "22", "24", "26", "28", "36", "48", "72"])
         self.font_size_combo.setCurrentText("12")
+        self.font_size_combo.lineEdit().setText("12")
+        self.font_size_combo.lineEdit().setStyleSheet(
+            "QLineEdit { color: #ffffff; background-color: #30303b; border: none; padding: 0px 2px; }"
+        )
         self.font_size_combo.setToolTip("Ukuran font (pt). Pilih atau ketik ukuran lalu tekan Enter")
         self.font_size_combo.activated.connect(self.apply_font_size)
         self.font_size_combo.lineEdit().returnPressed.connect(self.apply_font_size)
@@ -498,7 +600,7 @@ class NopAI(QMainWindow):
         self.editor.setTabChangesFocus(False)
 
         # Panel referensi ini muncul saat halaman karakter/latar diminimize.
-        # Editor novel tetap aktif sehingga pengguna bisa menulis sambil membaca referensi.
+        # Editor cerita tetap aktif sehingga pengguna bisa menulis sambil membaca referensi.
         self.editor_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.editor_splitter.setChildrenCollapsible(False)
         self.editor_splitter.addWidget(self.editor)
@@ -537,6 +639,11 @@ class NopAI(QMainWindow):
         QShortcut(QKeySequence("Ctrl+E"), self.editor, activated=lambda: self.apply_alignment("center"))
         QShortcut(QKeySequence("Ctrl+R"), self.editor, activated=lambda: self.apply_alignment("right"))
         QShortcut(QKeySequence("Ctrl+J"), self.editor, activated=lambda: self.apply_alignment("justify"))
+        # Rich-text shortcuts must be attached to the editor and work while it has focus.
+        for sequence, key in (("Ctrl+B", "bold"), ("Ctrl+I", "italic"), ("Ctrl+U", "underline"), ("Ctrl+Shift+X", "strike")):
+            shortcut = QShortcut(QKeySequence(sequence), self.editor)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda k=key: self.toggle_format_shortcut(k))
         footer = QHBoxLayout()
         self.word_label = QLabel("0 kata")
         self.word_label.setObjectName("muted")
@@ -581,7 +688,7 @@ class NopAI(QMainWindow):
         record_layout.addWidget(self.record_details_input, 1)
         record_buttons = QHBoxLayout()
         record_buttons.addStretch()
-        self.record_back_button = QPushButton("Kembali ke Novel")
+        self.record_back_button = QPushButton("Kembali ke Cerita")
         self.record_back_button.clicked.connect(self.minimize_record_page)
         record_buttons.addWidget(self.record_back_button)
         self.record_save_button = QPushButton("Simpan")
@@ -591,18 +698,43 @@ class NopAI(QMainWindow):
         record_layout.addLayout(record_buttons)
         self.center_stack.addWidget(self.record_page)
 
+        # Data-driven pages for the story bible. Each section has persistent CRUD.
+        self.data_pages = {}
+        self.data_lists = {}
+        self.data_searches = {}
+        self.data_titles = {
+            "characters": ("Karakter", "Karakter", "Profil karakter, peran, dan trait.")
+        }
+        with db() as conn:
+            custom_rows = conn.execute("SELECT id, section, name FROM custom_categories ORDER BY id").fetchall()
+        for category_id, section, name in custom_rows:
+            key = f"custom_{category_id}"
+            self.data_titles[key] = (name, name, f"Kategori cerita buatanmu: {name}.")
+        for key, (title, category, description) in self.data_titles.items():
+            self.create_data_page(key, title, category, description)
+
         # AI panel
         ai_panel = QFrame()
+        self.ai_panel = ai_panel
         ai_panel.setObjectName("panel")
         ai_panel.setMinimumWidth(280)
         ai_layout = QVBoxLayout(ai_panel)
-        ai_layout.setContentsMargins(10, 10, 10, 10)
+        ai_layout.setContentsMargins(12, 12, 12, 12)
+        ai_layout.setSpacing(8)
+        ai_header = QHBoxLayout()
         ai_title = QLabel("✦ AI Assistant")
         ai_title.setObjectName("heading")
-        ai_layout.addWidget(ai_title)
+        ai_header.addWidget(ai_title, 1)
+        ai_hide_button = QPushButton("×")
+        ai_hide_button.setObjectName("iconButton")
+        ai_hide_button.setFixedSize(28, 28)
+        ai_hide_button.setToolTip("Sembunyikan AI Assistant")
+        ai_hide_button.clicked.connect(self.toggle_ai_panel)
+        ai_header.addWidget(ai_hide_button)
+        ai_layout.addLayout(ai_header)
         self.chat = QTextEdit()
         self.chat.setReadOnly(True)
-        self.chat.setPlaceholderText("Hai! Aku NopAI. Aku bisa membantu melanjutkan cerita, memberi saran, dan memeriksa konsistensi.")
+        self.chat.setPlaceholderText("Hai, aku asistenmu. Aku bisa membantu melanjutkan cerita, memberi saran, dan memeriksa konsistensi.")
         ai_layout.addWidget(self.chat, 1)
         clear_chat_button = QPushButton("Bersihkan Chat")
         clear_chat_button.clicked.connect(self.clear_chat)
@@ -610,15 +742,15 @@ class NopAI(QMainWindow):
         for label, prompt in [
             ("Lanjutkan adegan ini", "Lanjutkan adegan dari bagian akhir bab aktif. Jaga gaya dan konsistensi cerita."),
             ("Ubah gaya tulisan", "Berikan versi revisi dari bagian akhir naskah dengan gaya yang lebih kuat, tanpa mengubah fakta cerita."),
-            ("Periksa konsistensi", "Periksa kemungkinan inkonsistensi berdasarkan konteks novel yang tersedia."),
-            ("Tanya tentang cerita", "Ringkas informasi penting yang relevan dari konteks novel.")
+            ("Periksa konsistensi", "Periksa kemungkinan inkonsistensi berdasarkan konteks cerita yang tersedia."),
+            ("Tanya tentang cerita", "Ringkas informasi penting yang relevan dari konteks cerita.")
         ]:
             quick = QPushButton(label)
             quick.clicked.connect(lambda checked=False, p=prompt: self.run_quick_prompt(p))
             ai_layout.addWidget(quick)
         self.prompt = QTextEdit()
-        self.prompt.setPlaceholderText("Tulis perintah atau pertanyaan...")
-        self.prompt.setMaximumHeight(90)
+        self.prompt.setPlaceholderText("Tanya asisten tentang ceritamu...")
+        self.prompt.setMaximumHeight(105)
         ai_layout.addWidget(self.prompt)
         self.send_button = QPushButton("Kirim ke AI ➤")
         self.send_button.setObjectName("primary")
@@ -628,45 +760,558 @@ class NopAI(QMainWindow):
         insert_button.clicked.connect(self.insert_answer)
         ai_layout.addWidget(insert_button)
 
-        # Right quick context panel with right-click actions
-        context_panel = QFrame()
-        context_panel.setObjectName("panel")
-        context_panel.setMinimumWidth(210)
-        context_layout = QVBoxLayout(context_panel)
-        context_layout.setContentsMargins(10, 10, 10, 10)
-        context_layout.setSpacing(6)
-        context_title = QLabel("DETAIL CERITA")
-        context_title.setObjectName("heading")
-        context_layout.addWidget(context_title)
-        context_layout.addWidget(QLabel("Karakter"))
-        self.character_list = QListWidget()
-        self.character_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.character_list.customContextMenuRequested.connect(lambda pos: self.show_record_menu("characters", self.character_list, pos))
-        self.character_list.itemDoubleClicked.connect(lambda item: self.edit_record_from_item("characters", item))
-        context_layout.addWidget(self.character_list, 1)
-        add_char = QPushButton("＋ Tambah Karakter")
-        add_char.clicked.connect(lambda: self.add_record("characters"))
-        context_layout.addWidget(add_char)
-        context_layout.addWidget(QLabel("Latar"))
-        self.world_list = QListWidget()
-        self.world_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.world_list.customContextMenuRequested.connect(lambda pos: self.show_record_menu("worldbuilding", self.world_list, pos))
-        self.world_list.itemDoubleClicked.connect(lambda item: self.edit_record_from_item("worldbuilding", item))
-        context_layout.addWidget(self.world_list, 1)
-        add_world = QPushButton("＋ Tambah Latar")
-        add_world.clicked.connect(lambda: self.add_record("worldbuilding"))
-        context_layout.addWidget(add_world)
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter = splitter
+        splitter.setObjectName("mainSplitter")
+        splitter.setChildrenCollapsible(False)
         splitter.addWidget(center)
-        splitter.addWidget(context_panel)
         splitter.addWidget(ai_panel)
-        # AI berada di sisi paling kanan, sementara konteks tetap di sebelah editor.
-        splitter.setSizes([650, 250, 340])
+        splitter.setSizes([900, 360])
 
         root_layout.addWidget(sidebar)
         root_layout.addWidget(splitter, 1)
         self.setCentralWidget(root)
+        self._last_splitter_sizes = [900, 360]
+        self._focus_mode = False
+        self._focus_ai_was_visible = True
+        QShortcut(QKeySequence("Ctrl+Shift+A"), self, activated=self.toggle_ai_panel)
+        QShortcut(QKeySequence("Ctrl+Shift+F"), self, activated=self.toggle_focus_mode)
+
+    def toggle_ai_panel(self):
+        """Tampilkan/sembunyikan AI tanpa mengubah panel lain."""
+        if not hasattr(self, "ai_panel"):
+            return
+        if self.ai_panel.isVisible():
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 2 and sizes[1] > 0:
+                self._last_splitter_sizes = sizes
+            self.ai_panel.hide()
+            self.ai_toggle_button.setText("Tampilkan AI")
+            self.ai_toggle_button.setToolTip("Tampilkan AI Assistant (Ctrl+Shift+A)")
+            visible_sizes = self.main_splitter.sizes()
+            if len(visible_sizes) == 2:
+                self.main_splitter.setSizes([visible_sizes[0] + visible_sizes[1], 0])
+        else:
+            self.ai_panel.show()
+            self.ai_toggle_button.setText("Sembunyikan AI")
+            self.ai_toggle_button.setToolTip("Sembunyikan AI Assistant (Ctrl+Shift+A)")
+            sizes = self._last_splitter_sizes or [900, 360]
+            self.main_splitter.setSizes(sizes)
+
+    def toggle_focus_mode(self):
+        """Mode menulis fokus; tombol header tetap tersedia untuk keluar."""
+        if not hasattr(self, "main_splitter"):
+            return
+        if not self._focus_mode:
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 2:
+                self._last_splitter_sizes = sizes
+            self._focus_ai_was_visible = self.ai_panel.isVisible()
+            self._focus_mode = True
+            self.sidebar.hide()
+            self.ai_panel.hide()
+            self.focus_button.setText("Keluar Fokus")
+            self.ai_toggle_button.setText("Tampilkan AI")
+            self.main_splitter.setSizes([1, 0])
+        else:
+            self._focus_mode = False
+            self.sidebar.show()
+            if self._focus_ai_was_visible:
+                self.ai_panel.show()
+                self.ai_toggle_button.setText("Sembunyikan AI")
+            else:
+                self.ai_panel.hide()
+                self.ai_toggle_button.setText("Tampilkan AI")
+            self.main_splitter.setSizes(self._last_splitter_sizes or [900, 360])
+            self.focus_button.setText("◉ Fokus")
+
+    def add_nav_entry(self, key, label, section_key):
+        button = QPushButton(label)
+        button.setObjectName("navButton")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setCheckable(True)
+        button.setAutoExclusive(False)
+        button.clicked.connect(lambda checked=False, k=key: self.open_navigation_page(k))
+        self.nav_buttons[key] = button
+        add_button = self.nav_section_widgets.get(section_key + "_add")
+        layout = self.nav_section_layouts[section_key]
+        if add_button is not None:
+            layout.insertWidget(layout.indexOf(add_button), button)
+        else:
+            layout.addWidget(button)
+        return button
+
+    def load_custom_category_navigation(self, side):
+        with db() as conn:
+            rows = conn.execute("SELECT id, section, name FROM custom_categories ORDER BY id").fetchall()
+        for category_id, section, name in rows:
+            key = f"custom_{category_id}"
+            self.add_nav_entry(key, "  " + name, section)
+
+    def add_custom_category(self, section):
+        section_label = "Story Bible" if section == "story" else "World Bible"
+        # Offer useful built-in category suggestions while still allowing custom names.
+        defaults = (["Karakter", "Hubungan", "Konflik", "Alur Cerita", "Tema", "Lore", "Catatan"]
+                    if section == "story" else
+                    ["Lokasi", "Kelompok", "Item", "Konsep", "Sistem Kekuatan", "Aturan", "Sejarah", "Budaya", "Organisasi", "Makhluk", "Lore", "Lainnya"])
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Tambah Kategori")
+        dialog.setMinimumWidth(360)
+        form = QVBoxLayout(dialog)
+        form.addWidget(QLabel(f"Pilih kategori bawaan atau ketik kategori baru untuk {section_label}:"))
+        category_combo = QComboBox()
+        category_combo.setEditable(True)
+        category_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        category_combo.addItems(defaults)
+        category_combo.setCurrentText("")
+        category_combo.setPlaceholderText("Pilih atau ketik nama kategori")
+        form.addWidget(category_combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = category_combo.currentText().strip()
+        if not name:
+            return
+        try:
+            with db() as conn:
+                cur = conn.execute("INSERT INTO custom_categories (section, name) VALUES (?, ?)", (section, name))
+                category_id = cur.lastrowid
+        except sqlite3.IntegrityError:
+            QMessageBox.information(self, "Kategori sudah ada", "Kategori dengan nama itu sudah ada di bagian ini.")
+            return
+        key = f"custom_{category_id}"
+        self.data_titles[key] = (name, name, f"Kategori cerita buatanmu: {name}.")
+        self.create_data_page(key, name, name, self.data_titles[key][2])
+        self.add_nav_entry(key, "  " + name, section)
+        self.open_navigation_page(key)
+
+    def create_data_page(self, key, title, category, description):
+        # Bible opens as a movable, non-modal window so the manuscript editor
+        # remains visible and editable at the same time.
+        page = QDialog(self, Qt.WindowType.Window)
+        page.setWindowTitle(f"{title} — Stomake")
+        page.resize(620, 680)
+        page.setMinimumSize(480, 420)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+        page_header = QHBoxLayout()
+        heading = QLabel(title)
+        heading.setObjectName("heading")
+        page_header.addWidget(heading)
+        page_header.addStretch()
+        add_btn = QPushButton("＋ Tambah " + category)
+        add_btn.setObjectName("primary")
+        add_btn.clicked.connect(lambda checked=False, k=key: self.create_story_record(k))
+        page_header.addWidget(add_btn)
+        layout.addLayout(page_header)
+        desc = QLabel(description)
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+        search = QLineEdit()
+        search.setPlaceholderText("Cari " + title.lower() + "...")
+        search.textChanged.connect(lambda text, k=key: self.refresh_story_records(k))
+        layout.addWidget(search)
+        record_list = QListWidget()
+        record_list.itemDoubleClicked.connect(lambda item, k=key: self.edit_story_record(k, item))
+        record_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        record_list.customContextMenuRequested.connect(lambda pos, k=key: self.story_record_menu(k, pos))
+        layout.addWidget(record_list, 1)
+        actions = QHBoxLayout()
+        edit_btn = QPushButton("Edit")
+        edit_btn.clicked.connect(lambda checked=False, k=key: self.edit_selected_story_record(k))
+        delete_btn = QPushButton("Hapus")
+        delete_btn.clicked.connect(lambda checked=False, k=key: self.delete_selected_story_record(k))
+        actions.addWidget(edit_btn)
+        actions.addWidget(delete_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+        self.data_pages[key] = page
+        self.data_lists[key] = record_list
+        self.data_searches[key] = search
+
+    # -------------------------
+    # STORY BIBLE NAVIGATION / CRUD
+    # -------------------------
+
+    def open_navigation_page(self, key):
+        if key in self.data_pages:
+            self.save_current_chapter()
+            self.refresh_story_records(key)
+            page = self.data_pages[key]
+            page.show()
+            page.raise_()
+            page.activateWindow()
+            self.chapter_heading.setText(self.chapter_title or "Editor Cerita")
+        for name, button in self.nav_buttons.items():
+            button.setChecked(name == key)
+
+    def refresh_story_records(self, kind):
+        if kind not in self.data_lists or self.project_id is None:
+            return
+        query = self.data_searches[kind].text().strip() if kind in self.data_searches else ""
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT id, name, category, details, status FROM story_records "
+                "WHERE project_id = ? AND kind = ? AND (name LIKE ? OR details LIKE ? OR category LIKE ? OR status LIKE ? OR metadata LIKE ?) "
+                "ORDER BY id DESC",
+                (self.project_id, kind, f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%")
+            ).fetchall()
+        widget = self.data_lists[kind]
+        widget.clear()
+        for record_id, name, category, details, status in rows:
+            subtitle = " · ".join(x for x in (category, status) if x)
+            item = QListWidgetItem(name + ("\n" + subtitle if subtitle else ""))
+            item.setData(Qt.ItemDataRole.UserRole, record_id)
+            item.setToolTip(details[:1000])
+            widget.addItem(item)
+        if not rows:
+            widget.addItem(QListWidgetItem("Belum ada data. Klik tombol Tambah untuk membuat entri pertama."))
+
+    def create_story_record(self, kind, record_id=None):
+        if self.project_id is None:
+            QMessageBox.information(self, "Stomake", "Buat atau pilih cerita terlebih dahulu.")
+            return
+        existing = None
+        metadata = {}
+        linked_chapter_ids = set()
+        existing_relationships = []
+        if record_id is not None:
+            with db() as conn:
+                existing = conn.execute(
+                    "SELECT name, category, details, status, metadata FROM story_records WHERE id=? AND project_id=? AND kind=?",
+                    (record_id, self.project_id, kind)
+                ).fetchone()
+                linked_chapter_ids = {r[0] for r in conn.execute(
+                    "SELECT chapter_id FROM story_record_chapters WHERE record_id=?", (record_id,)
+                ).fetchall()}
+                if kind == "characters":
+                    existing_relationships = conn.execute(
+                        "SELECT cr.id, cr.relation, cr.notes, other.name, other.id "
+                        "FROM character_relationships cr JOIN story_records other ON "
+                        "other.id = CASE WHEN cr.source_id=? THEN cr.target_id ELSE cr.source_id END "
+                        "WHERE cr.project_id=? AND (cr.source_id=? OR cr.target_id=?) ORDER BY other.name",
+                        (record_id, self.project_id, record_id, record_id)
+                    ).fetchall()
+            if not existing:
+                return
+            try:
+                metadata = json.loads(existing[4] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+
+        title, category_default, _ = self.data_titles[kind]
+        dialog = QDialog(self.data_pages.get(kind, self))
+        dialog.setWindowTitle(("Edit " if existing else "Tambah ") + title)
+        dialog.resize(720, 700)
+        dialog.setMinimumSize(560, 500)
+        dialog.setStyleSheet("""
+            QDialog, QWidget { background-color: #17191f; color: #e8edf5; }
+            QLabel { color: #e8edf5; background: transparent; }
+            QLineEdit, QTextEdit, QComboBox, QListWidget {
+                background-color: #242832; color: #f2f5fa;
+                border: 1px solid #3d4655; border-radius: 5px; padding: 6px;
+                selection-background-color: #087f8c; selection-color: #ffffff;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #242832; color: #f2f5fa;
+                selection-background-color: #087f8c; selection-color: #ffffff;
+            }
+            QTabWidget::pane { border: 1px solid #3d4655; background-color: #17191f; }
+            QTabBar::tab { background-color: #242832; color: #cbd5e1; padding: 7px 12px; border: 1px solid #3d4655; }
+            QTabBar::tab:selected { background-color: #087f8c; color: #ffffff; }
+            QPushButton { background-color: #2a303b; color: #f2f5fa; border: 1px solid #465164; border-radius: 5px; padding: 6px 10px; }
+            QPushButton:hover { background-color: #374151; }
+        """)
+        outer = QVBoxLayout(dialog)
+        tabs = QTabWidget()
+        outer.addWidget(tabs, 1)
+
+        basic_page = QWidget()
+        basic_layout = QVBoxLayout(basic_page)
+        form = QFormLayout()
+        name_input = QLineEdit(existing[0] if existing else "")
+        name_input.setPlaceholderText("Nama / judul entri")
+        category_input = QComboBox()
+        category_input.setEditable(True)
+        category_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        category_defaults = ["Lokasi", "Kelompok", "Item", "Konsep", "Lore", "Aturan", "Sejarah", "Budaya", "Organisasi", "Lainnya"]
+        if kind == "characters":
+            category_defaults = ["Protagonis", "Antagonis", "Pendukung", "NPC", "Lainnya"]
+        with db() as conn:
+            saved_categories = [r[0] for r in conn.execute("SELECT DISTINCT category FROM story_records WHERE project_id=? AND kind=? AND category<>'' ORDER BY category", (self.project_id, kind)).fetchall()]
+            saved_custom_categories = [r[0] for r in conn.execute("SELECT value FROM custom_options WHERE project_id IN (0, ?) AND field_key=? ORDER BY value", (self.project_id, f"category:{kind}")).fetchall()]
+        for option in list(dict.fromkeys(category_defaults + saved_categories + saved_custom_categories)):
+            category_input.addItem(option)
+        category_input.setCurrentText(existing[1] if existing else category_default)
+        category_input.setToolTip("Pilih kategori bawaan atau ketik kategori sendiri.")
+
+        status_input = QComboBox()
+        status_input.setEditable(True)
+        status_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        if kind == "characters":
+            trait_defaults = ["Protagonis", "Antagonis", "Pendukung", "Manipulatif", "Ambisius", "Pemberani", "Pemalu", "Dingin", "Cerdas", "Setia", "Licik", "Humoris", "Introver", "Ekstrover"]
+            status_input.setPlaceholderText("Pilih/ketik trait; pisahkan tiap trait dengan koma")
+            status_label = "Trait karakter"
+            option_key = "traits:characters"
+        else:
+            trait_defaults = ["Penting", "Rahasia", "Misterius", "Berbahaya", "Magis", "Terlarang", "Legendaris"]
+            status_input.setPlaceholderText("Pilih/ketik tag; pisahkan dengan koma")
+            status_label = "Tag / Status"
+            option_key = f"tags:{kind}"
+        with db() as conn:
+            saved_statuses = [r[0] for r in conn.execute("SELECT DISTINCT status FROM story_records WHERE project_id=? AND kind=? AND status<>'' ORDER BY status", (self.project_id, kind)).fetchall()]
+            custom_statuses = [r[0] for r in conn.execute("SELECT value FROM custom_options WHERE project_id IN (0, ?) AND field_key=? ORDER BY value", (self.project_id, option_key)).fetchall()]
+        for option in list(dict.fromkeys(trait_defaults + saved_statuses + custom_statuses)):
+            status_input.addItem(option)
+        status_input.setCurrentText(existing[3] if existing else "")
+        status_input.setToolTip("Bisa pilih saran atau ketik sendiri. Gunakan koma untuk beberapa trait/tag.")
+        # When a comma is typed, remember everything before the current trait.
+        # QComboBox replaces its edit text on activation, so restore the prefix ourselves.
+        trait_state = {"prefix": "", "waiting": False}
+        def show_next_trait_suggestions(text):
+            if text.rstrip().endswith(","):
+                trait_state["prefix"] = text.rstrip()[:-1].rstrip()
+                trait_state["waiting"] = True
+                QTimer.singleShot(0, status_input.showPopup)
+            elif trait_state["waiting"] and text.strip():
+                # The user started typing a custom next trait; stop treating it as a selection.
+                trait_state["waiting"] = False
+        status_input.lineEdit().textEdited.connect(show_next_trait_suggestions)
+        def append_selected_trait(index):
+            chosen = status_input.itemText(index).strip()
+            if not chosen:
+                return
+            if trait_state["waiting"]:
+                prefix = trait_state["prefix"]
+                parts = [part.strip() for part in prefix.split(",") if part.strip()]
+                if not parts or parts[-1].casefold() != chosen.casefold():
+                    result = (prefix + ", " if prefix else "") + chosen + ", "
+                else:
+                    result = prefix + ", "
+                status_input.setEditText(result)
+                status_input.lineEdit().setCursorPosition(len(result))
+                trait_state["waiting"] = True
+                trait_state["prefix"] = result.rstrip()[:-1].rstrip()
+                QTimer.singleShot(0, status_input.showPopup)
+        status_input.activated.connect(append_selected_trait)
+        def remember_custom_values(combo, field_key):
+            raw = combo.currentText()
+            values = [part.strip() for part in raw.split(",") if part.strip()]
+            with db() as conn:
+                for value in values:
+                    try:
+                        conn.execute("INSERT OR IGNORE INTO custom_options (project_id, field_key, value) VALUES (?, ?, ?)", (self.project_id, field_key, value))
+                    except sqlite3.Error:
+                        pass
+        category_input.lineEdit().editingFinished.connect(lambda: remember_custom_values(category_input, f"category:{kind}"))
+        status_input.lineEdit().editingFinished.connect(lambda: remember_custom_values(status_input, option_key))
+        details_input = QTextEdit()
+        details_input.setPlaceholderText("Deskripsi umum, catatan, rahasia, aturan, atau informasi lain...")
+        details_input.setPlainText(existing[2] if existing else "")
+        form.addRow("Nama / Judul", name_input)
+        form.addRow("Kategori", category_input)
+        form.addRow(status_label, status_input)
+        basic_layout.addLayout(form)
+        basic_layout.addWidget(QLabel("Deskripsi umum"))
+        basic_layout.addWidget(details_input, 1)
+        tabs.addTab(basic_page, "Umum")
+
+        profile_inputs = {}
+        if kind == "characters":
+            profile_page = QWidget()
+            profile_layout = QVBoxLayout(profile_page)
+            profile_form = QFormLayout()
+            profile_fields = [
+                ("age", "Usia", "Contoh: 17 tahun"),
+                ("appearance", "Penampilan", "Ciri fisik, pakaian, warna mata..."),
+                ("personality", "Kepribadian", "Sifat dan cara berperilaku..."),
+                ("background", "Latar belakang", "Sejarah hidup karakter..."),
+                ("motivation", "Motivasi", "Apa yang mendorong karakter?"),
+                ("goals_conflicts", "Tujuan & konflik", "Tujuan, hambatan, konflik pribadi..."),
+                ("strengths_weaknesses", "Kelebihan & kelemahan", "Kemampuan dan kelemahan..."),
+                ("development", "Perkembangan karakter", "Perubahan karakter sepanjang cerita..."),
+                ("ai_notes", "Catatan untuk AI", "Fakta penting yang perlu dijaga AI...")
+            ]
+            for field_key, label, placeholder in profile_fields:
+                edit = QTextEdit()
+                edit.setPlaceholderText(placeholder)
+                edit.setPlainText(str(metadata.get(field_key, "")))
+                edit.setMaximumHeight(76 if field_key in ("age",) else 100)
+                profile_inputs[field_key] = edit
+                profile_form.addRow(label + ":", edit)
+            profile_layout.addLayout(profile_form)
+            tabs.addTab(profile_page, "Profil Karakter")
+
+        links_page = QWidget()
+        links_layout = QVBoxLayout(links_page)
+        links_layout.addWidget(QLabel("Hubungkan entri ini dengan bab yang relevan:"))
+        chapter_checks = []
+        for chapter_row in get_chapters(self.project_id):
+            chapter_id, chapter_title = chapter_row[0], chapter_row[1]
+            check = QCheckBox(chapter_title)
+            check.setProperty("chapter_id", chapter_id)
+            check.setChecked(chapter_id in linked_chapter_ids)
+            chapter_checks.append(check)
+            links_layout.addWidget(check)
+        if not chapter_checks:
+            links_layout.addWidget(QLabel("Belum ada bab di proyek ini."))
+        links_layout.addStretch(1)
+        tabs.addTab(links_page, "Bab terkait")
+
+        relation_list = None
+        relation_target = None
+        relation_label = None
+        relation_notes = None
+        relation_rows = []
+        if kind == "characters":
+            rel_page = QWidget()
+            rel_layout = QVBoxLayout(rel_page)
+            rel_layout.addWidget(QLabel("Hubungkan karakter dengan karakter lain. Simpan karakter ini dahulu jika masih baru."))
+            relation_list = QListWidget()
+            relation_list.setStyleSheet("""
+                QListWidget { background-color: #20242d; color: #f2f5fa;
+                    border: 1px solid #3d4655; border-radius: 5px; padding: 6px; }
+                QListWidget::item { color: #f2f5fa; padding: 7px; }
+                QListWidget::item:selected { background-color: #087f8c; color: #ffffff; }
+            """)
+            rel_page.setStyleSheet("QWidget { background-color: #17191f; color: #e8edf5; }")
+            for rel_id, relation, notes, other_name, other_id in existing_relationships:
+                item = QListWidgetItem(f"{name_input.text() or (existing[0] if existing else 'Karakter')} — {relation} — {other_name}" + (f"\n{notes}" if notes else ""))
+                item.setData(Qt.ItemDataRole.UserRole, rel_id)
+                item.setData(Qt.ItemDataRole.UserRole + 1, other_id)
+                relation_list.addItem(item)
+            rel_layout.addWidget(relation_list, 1)
+            rel_form = QFormLayout()
+            relation_target = QComboBox()
+            with db() as conn:
+                others = conn.execute("SELECT id, name FROM story_records WHERE project_id=? AND kind='characters' AND id<>? ORDER BY name", (self.project_id, record_id or -1)).fetchall()
+            for other_id, other_name in others:
+                relation_target.addItem(other_name, other_id)
+            relation_label = QLineEdit()
+            relation_label.setPlaceholderText("Teman, musuh, keluarga, mentor...")
+            relation_notes = QLineEdit()
+            relation_notes.setPlaceholderText("Catatan hubungan (opsional)")
+            rel_form.addRow("Karakter", relation_target)
+            rel_form.addRow("Hubungan", relation_label)
+            rel_form.addRow("Catatan", relation_notes)
+            rel_layout.addLayout(rel_form)
+            rel_actions = QHBoxLayout()
+            add_rel = QPushButton("＋ Tambah hubungan")
+            remove_rel = QPushButton("Hapus hubungan terpilih")
+            rel_actions.addWidget(add_rel)
+            rel_actions.addWidget(remove_rel)
+            rel_layout.addLayout(rel_actions)
+            def add_relationship_to_list():
+                if record_id is None:
+                    QMessageBox.information(dialog, "Simpan karakter dahulu", "Simpan karakter ini dahulu, lalu buka kembali untuk menambahkan hubungan.")
+                    return
+                target_id = relation_target.currentData()
+                relation = relation_label.text().strip()
+                if target_id is None or not relation:
+                    QMessageBox.information(dialog, "Data belum lengkap", "Pilih karakter dan isi jenis hubungannya.")
+                    return
+                with db() as conn:
+                    try:
+                        cur = conn.execute("INSERT INTO character_relationships (project_id, source_id, target_id, relation, notes) VALUES (?, ?, ?, ?, ?)", (self.project_id, record_id, target_id, relation, relation_notes.text().strip()))
+                        rel_id = cur.lastrowid
+                    except sqlite3.IntegrityError:
+                        QMessageBox.information(dialog, "Hubungan sudah ada", "Hubungan dengan label yang sama sudah tercatat.")
+                        return
+                target_name = relation_target.currentText()
+                item = QListWidgetItem(f"{name_input.text()} — {relation} — {target_name}" + (f"\n{relation_notes.text().strip()}" if relation_notes.text().strip() else ""))
+                item.setData(Qt.ItemDataRole.UserRole, rel_id)
+                item.setData(Qt.ItemDataRole.UserRole + 1, target_id)
+                relation_list.addItem(item)
+                relation_label.clear(); relation_notes.clear()
+            def remove_relationship_from_list():
+                item = relation_list.currentItem() if relation_list else None
+                if item is None:
+                    return
+                rel_id = item.data(Qt.ItemDataRole.UserRole)
+                if rel_id is not None:
+                    with db() as conn:
+                        conn.execute("DELETE FROM character_relationships WHERE id=? AND project_id=?", (rel_id, self.project_id))
+                relation_list.takeItem(relation_list.row(item))
+            add_rel.clicked.connect(add_relationship_to_list)
+            remove_rel.clicked.connect(remove_relationship_from_list)
+            tabs.addTab(rel_page, "Hubungan")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Simpan")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        outer.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Stomake", "Nama atau judul tidak boleh kosong.")
+            return
+        if kind == "characters":
+            metadata = {key: edit.toPlainText().strip() for key, edit in profile_inputs.items()}
+        else:
+            metadata = {}
+        with db() as conn:
+            if record_id is None:
+                cur = conn.execute(
+                    "INSERT INTO story_records (project_id, kind, name, category, details, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (self.project_id, kind, name, category_input.currentText().strip(), details_input.toPlainText(), status_input.currentText().strip(), json.dumps(metadata, ensure_ascii=False))
+                )
+                record_id = cur.lastrowid
+            else:
+                conn.execute(
+                    "UPDATE story_records SET name=?, category=?, details=?, status=?, metadata=? WHERE id=? AND project_id=? AND kind=?",
+                    (name, category_input.currentText().strip(), details_input.toPlainText(), status_input.currentText().strip(), json.dumps(metadata, ensure_ascii=False), record_id, self.project_id, kind)
+                )
+            # Replace chapter associations with the currently checked chapters.
+            conn.execute("DELETE FROM story_record_chapters WHERE record_id=?", (record_id,))
+            for check in chapter_checks:
+                if check.isChecked():
+                    conn.execute("INSERT OR IGNORE INTO story_record_chapters (record_id, chapter_id) VALUES (?, ?)", (record_id, check.property("chapter_id")))
+        self.refresh_story_records(kind)
+        self.save_label.setText("● " + title + " tersimpan")
+
+    def edit_story_record(self, kind, item):
+        if item is None:
+            return
+        record_id = item.data(Qt.ItemDataRole.UserRole)
+        if record_id is not None:
+            self.create_story_record(kind, record_id)
+
+    def edit_selected_story_record(self, kind):
+        self.edit_story_record(kind, self.data_lists[kind].currentItem())
+
+    def delete_selected_story_record(self, kind):
+        item = self.data_lists[kind].currentItem()
+        record_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if record_id is None:
+            return
+        title = self.data_titles[kind][0]
+        answer = QMessageBox.question(self, "Hapus entri", f"Hapus entri ini dari {title}?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        with db() as conn:
+            conn.execute("DELETE FROM story_records WHERE id=? AND project_id=? AND kind=?", (record_id, self.project_id, kind))
+        self.refresh_story_records(kind)
+
+    def story_record_menu(self, kind, pos):
+        item = self.data_lists[kind].itemAt(pos)
+        if item is None or item.data(Qt.ItemDataRole.UserRole) is None:
+            return
+        menu = QMenu(self)
+        edit_action = menu.addAction("Edit")
+        delete_action = menu.addAction("Hapus")
+        action = menu.exec(self.data_lists[kind].mapToGlobal(pos))
+        if action == edit_action:
+            self.edit_story_record(kind, item)
+        elif action == delete_action:
+            self.data_lists[kind].setCurrentItem(item)
+            self.delete_selected_story_record(kind)
 
     # -------------------------
     # PROJECT MANAGEMENT
@@ -714,7 +1359,7 @@ class NopAI(QMainWindow):
 
     def new_project(self):
         title, ok = QInputDialog.getText(
-            self, "Novel Baru", "Judul novel:"
+            self, "Cerita Baru", "Judul cerita:"
         )
         if not ok or not title.strip():
             return
@@ -722,12 +1367,12 @@ class NopAI(QMainWindow):
         self.load_projects(project_id)
 
     def show_project_menu(self, pos):
-        """Menu klik kanan pada pemilih novel."""
+        """Menu klik kanan pada pemilih cerita."""
         if self.project_id is None:
             return
         menu = QMenu(self)
-        rename_action = menu.addAction("✎ Ubah Judul Novel")
-        delete_action = menu.addAction("⌫ Hapus Novel")
+        rename_action = menu.addAction("✎ Ubah Judul Cerita")
+        delete_action = menu.addAction("⌫ Hapus Cerita")
         chosen = menu.exec(self.project_combo.mapToGlobal(pos))
         if chosen == rename_action:
             self.rename_project()
@@ -741,16 +1386,16 @@ class NopAI(QMainWindow):
         projects = get_projects()
         if len(projects) <= 1:
             QMessageBox.information(
-                self, "NopAI",
-                "Novel terakhir tidak bisa dihapus. Buat novel baru terlebih dahulu."
+                self, "Stomake",
+                "Cerita terakhir tidak bisa dihapus. Buat cerita baru terlebih dahulu."
             )
             return
 
         title = self.project_title
         answer = QMessageBox.question(
-            self, "Hapus Novel",
-            f"Yakin ingin menghapus novel '{title}'?\n\n"
-            "Semua bab, karakter, dan latar dalam novel ini juga akan dihapus.\n"
+            self, "Hapus Cerita",
+            f"Yakin ingin menghapus cerita '{title}'?\n\n"
+            "Semua bab, karakter, dan latar dalam cerita ini juga akan dihapus.\n"
             "Tindakan ini tidak bisa dibatalkan.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
@@ -773,7 +1418,7 @@ class NopAI(QMainWindow):
         if self.project_id is None:
             return
         title, ok = QInputDialog.getText(
-            self, "Ubah Judul Novel", "Judul baru:",
+            self, "Ubah Judul Cerita", "Judul baru:",
             text=self.project_title
         )
         if not ok or not title.strip():
@@ -791,10 +1436,10 @@ class NopAI(QMainWindow):
         if index >= 0:
             self.project_combo.setItemText(index, self.project_title)
         self.loading = False
-        self.save_label.setText("● Judul novel disimpan")
+        self.save_label.setText("● Judul cerita disimpan")
 
     # -------------------------
-    # EXPORT NOVEL
+    # EXPORT CERITA
     # -------------------------
 
     def show_export_menu(self):
@@ -803,23 +1448,23 @@ class NopAI(QMainWindow):
         docs_action = menu.addAction("Export untuk Google Docs…")
         chosen = menu.exec(self.mapToGlobal(self.rect().center()))
         if chosen == word_action:
-            self.export_novel(open_google_docs=False)
+            self.export_cerita(open_google_docs=False)
         elif chosen == docs_action:
-            self.export_novel(open_google_docs=True)
+            self.export_cerita(open_google_docs=True)
 
-    def export_novel(self, open_google_docs=False):
+    def export_cerita(self, open_google_docs=False):
         if self.project_id is None:
-            QMessageBox.warning(self, "Export Novel", "Pilih novel terlebih dahulu.")
+            QMessageBox.warning(self, "Export Cerita", "Pilih cerita terlebih dahulu.")
             return
 
         # Pastikan isi bab aktif tersimpan sebelum membaca semua bab dari database.
         self.save_current_chapter()
         safe_title = "".join(c for c in self.project_title if c not in '<>:\"/\\|?*').strip()
-        safe_title = safe_title or "Novel NopAI"
+        safe_title = safe_title or "Cerita Stomake"
         default_path = str(Path.home() / f"{safe_title}.docx")
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Novel ke Word" if not open_google_docs else "Siapkan Novel untuk Google Docs",
+            "Export Cerita ke Word" if not open_google_docs else "Siapkan Cerita untuk Google Docs",
             default_path,
             "Dokumen Word (*.docx)"
         )
@@ -835,7 +1480,7 @@ class NopAI(QMainWindow):
             QMessageBox.warning(
                 self, "Library belum tersedia",
                 "Fitur export Word membutuhkan python-docx.\n\n"
-                "Buka Command Prompt di folder NopAI lalu jalankan:\n"
+                "Buka Command Prompt di folder Stomake lalu jalankan:\n"
                 "py -m pip install python-docx"
             )
             return
@@ -859,7 +1504,7 @@ class NopAI(QMainWindow):
                 ).fetchall()
 
             if not project:
-                QMessageBox.warning(self, "Export Novel", "Novel tidak ditemukan.")
+                QMessageBox.warning(self, "Export Cerita", "Cerita tidak ditemukan.")
                 return
 
             document = Document()
@@ -916,15 +1561,15 @@ class NopAI(QMainWindow):
             QDesktopServices.openUrl(QUrl("https://docs.google.com/document/u/0/"))
             QMessageBox.information(
                 self, "Dokumen siap untuk Google Docs",
-                "Novel berhasil diekspor sebagai file Word (.docx).\n\n"
+                "Cerita berhasil diekspor sebagai file Word (.docx).\n\n"
                 "Google Docs sudah dibuka. Di Google Docs, pilih pembuka file, lalu upload/pilih file\n"
                 f"ini:\n{file_path}\n\n"
-                "NopAI tidak mengunggah otomatis ke akun Google; untuk itu diperlukan koneksi dan izin Google API."
+                "Stomake tidak mengunggah otomatis ke akun Google; untuk itu diperlukan koneksi dan izin Google API."
             )
         else:
             QMessageBox.information(
                 self, "Export berhasil",
-                f"Novel berhasil diekspor, termasuk {len(chapters)} bab, {len(characters)} karakter, "
+                f"Cerita berhasil diekspor, termasuk {len(chapters)} bab, {len(characters)} karakter, "
                 f"dan {len(lore_entries)} data lore/worldbuilding.\n\n{file_path}"
             )
 
@@ -978,14 +1623,14 @@ class NopAI(QMainWindow):
         if chapter_id == self.chapter_id:
             # Klik bab aktif juga bisa dipakai untuk kembali dari halaman karakter/latar.
             if hasattr(self, "center_stack") and self.center_stack.currentWidget() is self.record_page:
-                if self.save_record_form(return_to_novel=False):
+                if self.save_record_form(return_to_cerita=False):
                     self.center_stack.setCurrentWidget(self.chapter_page)
-                    self.chapter_heading.setText(self.chapter_title or "Editor Novel")
+                    self.chapter_heading.setText(self.chapter_title or "Editor Cerita")
             return
 
         self.save_current_chapter()
         if hasattr(self, "center_stack") and self.center_stack.currentWidget() is self.record_page:
-            self.save_record_form(return_to_novel=False)
+            self.save_record_form(return_to_cerita=False)
             self.center_stack.setCurrentWidget(self.chapter_page)
 
         with db() as conn:
@@ -1111,6 +1756,22 @@ class NopAI(QMainWindow):
         except sqlite3.Error as error:
             self.save_label.setText("● Gagal menyimpan")
             print("Database error:", error)
+
+    def toggle_format_shortcut(self, key):
+        """Toggle inline formatting from the keyboard without relying on toolbar focus."""
+        if key not in self.format_buttons:
+            return
+        current = self.editor.currentCharFormat()
+        if key == "bold":
+            enabled = current.fontWeight() < 600
+        elif key == "italic":
+            enabled = not current.fontItalic()
+        elif key == "underline":
+            enabled = not current.fontUnderline()
+        else:
+            enabled = not current.fontStrikeOut()
+        self.format_buttons[key].setChecked(enabled)
+        self.apply_format(key)
 
     def apply_format(self, key):
         """Apply rich-text formatting to the selection or current typing position."""
@@ -1249,7 +1910,7 @@ class NopAI(QMainWindow):
     # -------------------------
 
     def refresh_context_lists(self):
-        if not hasattr(self, "character_list") or self.project_id is None:
+        if not hasattr(self, "character_list") or not hasattr(self, "world_list") or self.project_id is None:
             return
         self.character_list.clear()
         self.world_list.clear()
@@ -1300,7 +1961,7 @@ class NopAI(QMainWindow):
 
     def add_record(self, kind):
         if self.project_id is None:
-            QMessageBox.information(self, "NopAI", "Pilih atau buat novel terlebih dahulu.")
+            QMessageBox.information(self, "Stomake", "Pilih atau buat cerita terlebih dahulu.")
             return
         self.open_record_window(kind)
 
@@ -1316,7 +1977,7 @@ class NopAI(QMainWindow):
         """Buka editor karakter/latar sebagai jendela mengambang non-modal.
 
         Jendela dapat dipindahkan, diubah ukurannya, diminimalkan, dan tetap
-        membiarkan pengguna mengetik di editor novel di belakangnya.
+        membiarkan pengguna mengetik di editor cerita di belakangnya.
         """
         if kind not in ("characters", "worldbuilding") or self.project_id is None:
             return
@@ -1406,7 +2067,7 @@ class NopAI(QMainWindow):
             nonlocal record_id
             name = name_input.text().strip()
             if not name:
-                QMessageBox.warning(window, "NopAI", "Nama tidak boleh kosong.")
+                QMessageBox.warning(window, "Stomake", "Nama tidak boleh kosong.")
                 name_input.setFocus()
                 return
             details = details_input.toPlainText().strip()
@@ -1456,12 +2117,12 @@ class NopAI(QMainWindow):
         window.raise_()
         window.activateWindow()
 
-    def save_record_form(self, return_to_novel=False):
+    def save_record_form(self, return_to_cerita=False):
         if self.project_id is None or self.active_records_kind not in ("characters", "worldbuilding"):
             return False
         name = self.record_name_input.text().strip()
         if not name:
-            QMessageBox.warning(self, "NopAI", "Nama tidak boleh kosong.")
+            QMessageBox.warning(self, "Stomake", "Nama tidak boleh kosong.")
             self.record_name_input.setFocus()
             return False
 
@@ -1499,24 +2160,24 @@ class NopAI(QMainWindow):
         self.chapter_heading.setText(self.record_page_heading.text())
         self.refresh_context_lists()
         self.save_label.setText("● Data karakter/latar tersimpan")
-        if return_to_novel:
+        if return_to_cerita:
             self.reference_record_kind = self.active_records_kind
             self.reference_record_id = self.active_record_id
             self.show_reference_for_active_record()
             self.center_stack.setCurrentWidget(self.chapter_page)
-            self.chapter_heading.setText(self.chapter_title or "Editor Novel")
+            self.chapter_heading.setText(self.chapter_title or "Editor Cerita")
         return True
 
     def minimize_record_page(self):
         # Form tambah yang masih kosong boleh ditutup tanpa membuat data kosong.
         if self.active_record_id is None and not self.record_name_input.text().strip():
             self.center_stack.setCurrentWidget(self.chapter_page)
-            self.chapter_heading.setText(self.chapter_title or "Editor Novel")
+            self.chapter_heading.setText(self.chapter_title or "Editor Cerita")
             self.active_records_kind = None
             self.active_record_id = None
             return
         # Simpan sebelum mengecilkan halaman agar perubahan tidak hilang.
-        self.save_record_form(return_to_novel=True)
+        self.save_record_form(return_to_cerita=True)
 
     def restore_reference_page(self):
         """Buka kembali halaman edit dari panel referensi yang sedang diminimize."""
@@ -1590,35 +2251,6 @@ class NopAI(QMainWindow):
         self.reference_panel.hide()
         self.editor_splitter.setSizes([self.editor_splitter.width(), 0])
 
-    def show_record_menu(self, kind, widget, pos):
-        item = widget.itemAt(pos)
-        if item is not None and item.data(Qt.ItemDataRole.UserRole) is None:
-            item = None
-        menu = QMenu(self)
-        add_action = menu.addAction("＋ Tambah data")
-        edit_action = menu.addAction("✎ Edit / Lihat")
-        delete_action = menu.addAction("⌫ Hapus")
-        edit_action.setEnabled(item is not None)
-        delete_action.setEnabled(item is not None)
-        chosen = menu.exec(widget.mapToGlobal(pos))
-        if chosen == add_action:
-            self.add_record(kind)
-        elif chosen == edit_action and item:
-            self.edit_record_from_item(kind, item)
-        elif chosen == delete_action and item:
-            record_id = item.data(Qt.ItemDataRole.UserRole)
-            name = item.text().split("\n")[0]
-            answer = QMessageBox.question(self, "Hapus data", f"Hapus '{name}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if answer == QMessageBox.StandardButton.Yes:
-                table = "characters" if kind == "characters" else "worldbuilding"
-                with db() as conn:
-                    conn.execute(f"DELETE FROM {table} WHERE id = ? AND project_id = ?", (record_id, self.project_id))
-                self.refresh_context_lists()
-
-    def manage_records(self, kind):
-        # Compatibility for older buttons/calls: refresh the in-panel list.
-        self.refresh_context_lists()
-
     def run_quick_prompt(self, prompt):
         self.prompt.setPlainText(prompt)
         self.ask_ai()
@@ -1649,11 +2281,37 @@ class NopAI(QMainWindow):
             for name, category, details in world_items
         ) or "Belum ada data worldbuilding."
 
+        # Include the extensible Story/World Bible and its chapter/relationship links.
+        with db() as conn:
+            records = conn.execute(
+                "SELECT id, kind, name, category, details, status, metadata FROM story_records WHERE project_id=? ORDER BY kind, name",
+                (self.project_id,)
+            ).fetchall()
+            linked = conn.execute(
+                "SELECT src.name, ch.title FROM story_record_chapters rc JOIN story_records src ON src.id=rc.record_id JOIN chapters ch ON ch.id=rc.chapter_id WHERE src.project_id=? ORDER BY src.name, ch.position",
+                (self.project_id,)
+            ).fetchall()
+            relationships = conn.execute(
+                "SELECT a.name, r.relation, b.name, r.notes FROM character_relationships r JOIN story_records a ON a.id=r.source_id JOIN story_records b ON b.id=r.target_id WHERE r.project_id=? ORDER BY a.name, b.name",
+                (self.project_id,)
+            ).fetchall()
+        extra_records = []
+        for rid, kind, name, category, details, status, raw_meta in records:
+            try:
+                meta = json.loads(raw_meta or "{}")
+            except (TypeError, json.JSONDecodeError):
+                meta = {}
+            profile = "; ".join(f"{k}: {v}" for k, v in meta.items() if v)
+            extra_records.append(f"- [{kind} / {category}] {name}; trait/tag: {status}; detail: {details}; {profile}")
+        linked_context = "\n".join(f"- {name} terkait dengan {chapter}" for name, chapter in linked) or "Belum ada tautan bab."
+        relationship_context = "\n".join(f"- {a} — {relation} — {b}" + (f" ({notes})" if notes else "") for a, relation, b, notes in relationships) or "Belum ada hubungan karakter yang dicatat."
         return (
-            f"Judul novel: {self.project_title}\n"
+            f"Judul cerita: {self.project_title}\n"
             f"Bab aktif: {self.chapter_title}\n\n"
-            f"KARAKTER:\n{character_context}\n\n"
-            f"WORLDBUILDING:\n{world_context}\n\n"
+            f"KARAKTER LAMA:\n{character_context}\n\n"
+            f"WORLDBUILDING LAMA:\n{world_context}\n\n"
+            f"STORY BIBLE / WORLD BIBLE:\n" + ("\n".join(extra_records) or "Belum ada entri.") +
+            f"\n\nTAUTAN BAB:\n{linked_context}\n\nHUBUNGAN KARAKTER:\n{relationship_context}\n\n"
             f"ISI BAB AKTIF:\n{self.editor.toPlainText()[-5000:]}"
         )
 
@@ -1665,7 +2323,7 @@ class NopAI(QMainWindow):
         prompt = self.prompt.toPlainText().strip()
         if not prompt:
             QMessageBox.information(
-                self, "NopAI", "Masukkan perintah untuk AI."
+                self, "Stomake", "Masukkan perintah untuk AI."
             )
             return
 
@@ -1674,7 +2332,7 @@ class NopAI(QMainWindow):
 
         context = self.build_story_context()
         self.chat.append(f"\nKAMU:\n{prompt}\n")
-        self.chat.append("NOPAI: Sedang berpikir...\n")
+        self.chat.append("Stomake: Sedang berpikir...\n")
         self.prompt.clear()
 
         self.send_button.setEnabled(False)
@@ -1690,7 +2348,7 @@ class NopAI(QMainWindow):
         answer = QMessageBox.question(
             self, "Bersihkan Chat",
             "Hapus seluruh percakapan yang terlihat di panel AI?\n\n"
-            "Naskah dan data novel tidak akan terhapus.",
+            "Naskah dan data cerita tidak akan terhapus.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -1700,7 +2358,7 @@ class NopAI(QMainWindow):
 
     def ai_success(self, answer):
         self.last_answer = answer
-        self.chat.append(f"NOPAI:\n{answer}\n")
+        self.chat.append(f"Stomake:\n{answer}\n")
         self.chat.append("-" * 32)
 
     def ai_failure(self, message):
@@ -1713,7 +2371,7 @@ class NopAI(QMainWindow):
     def insert_answer(self):
         if not self.last_answer:
             QMessageBox.information(
-                self, "NopAI", "Belum ada jawaban AI."
+                self, "Stomake", "Belum ada jawaban AI."
             )
             return
         self.editor.insertPlainText(self.last_answer)
@@ -1724,73 +2382,45 @@ class NopAI(QMainWindow):
     # -------------------------
 
     def apply_theme(self):
+        # Stomake editor palette inspired by the supplied VS Code screenshot.
         self.setStyleSheet("""
-            QWidget {
-                background-color: #0b1020;
-                color: #e3e9ff;
-                font-family: Segoe UI;
-                font-size: 13px;
+            QWidget { background: #050607; color: #e7edf1; font-family: "Segoe UI"; font-size: 13px; }
+            QFrame#sidebar { background: #050607; border-right: 1px solid #20c9e8; }
+            QFrame#sidebar QLabel { background: transparent; color: #dbe6eb; }
+            QLabel#logo { color: #20c9e8; font-size: 22px; font-weight: 750; }
+            QLabel#heading { color: #f1f5f7; font-size: 19px; font-weight: 700; }
+            QLabel#muted { color: #9aa8b0; }
+            QLabel#sectionLabel { color: #7f9ba6; font-size: 10px; font-weight: 700; letter-spacing: 1px; padding-top: 8px; }
+            QFrame#panel { background: #080a0d; border: 1px solid #1fc8e6; border-radius: 7px; }
+            QPushButton, QComboBox, QListWidget, QLineEdit {
+                background: #07090b; color: #e4edf2; border: 1px solid #155b6b; border-radius: 5px; padding: 6px 9px;
             }
-            QFrame#sidebar {
-                background-color: #0e1528;
-                border-right: 1px solid #263250;
-            }
-            QFrame#panel {
-                background-color: #111a2e;
-                border: 1px solid #283858;
-                border-radius: 10px;
-            }
-            QLabel#logo {
-                color: #a99aff;
-                font-size: 24px;
-                font-weight: bold;
-            }
-            QLabel#heading {
-                color: #c3b8ff;
-                font-size: 18px;
-                font-weight: bold;
-            }
-            QLabel#muted {
-                color: #91a1c4;
-            }
-            QPushButton, QComboBox, QListWidget {
-                background-color: #1a2641;
-                border: 1px solid #2b3b5d;
-                border-radius: 6px;
-                padding: 7px;
-            }
-            QPushButton#navButton { text-align: left; background-color: transparent; border-color: transparent; }
-            QPushButton:hover {
-                background-color: #29385c;
-            }
-            QPushButton:checked {
-                background-color: #5267a5;
-                border: 1px solid #8da6ff;
-                color: #ffffff;
-                font-weight: bold;
-            }
-            QPushButton#primary {
-                background-color: #6654ce;
-                font-weight: bold;
-            }
-            QTextEdit, QLineEdit {
-                background-color: #0b1223;
-                border: 1px solid #2b3b5d;
-                border-radius: 7px;
-                padding: 9px;
-                selection-background-color: #6654ce;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-radius: 5px;
-            }
-            QListWidget::item:selected {
-                background-color: #293461;
-                color: #c7baff;
-            }
-            QDialog {
-                background-color: #111a2e;
-            }
+            QPushButton:hover, QComboBox:hover { border-color: #20c9e8; background: #0c1519; }
+            QPushButton:pressed { background: #10262d; }
+            QPushButton:checked { background: #17252b; color: #ffb347; border: 1px solid #ff9e27; }
+            QPushButton#primary { background: #e9a51a; color: #111; border: 1px solid #ffb52d; font-weight: 700; }
+            QPushButton#primary:hover { background: #ffc247; }
+            QPushButton#navButton { text-align: left; border: 1px solid transparent; padding: 6px 8px; min-height: 18px; }
+            QPushButton#navButton:checked { background: #151b1e; color: #ffb347; border-left: 2px solid #ff9e27; border-radius: 3px; }
+            QPushButton#iconButton { padding: 0; min-height: 0; border-radius: 5px; font-size: 18px; }
+            QComboBox QAbstractItemView { background: #080a0d; color: #e4edf2; selection-background-color: #153b45; selection-color: #fff; }
+            QTextEdit { background: #020304; color: #e7edf1; border: 1px solid #155b6b; border-radius: 5px; padding: 9px; selection-background-color: #12677a; }
+            QTextEdit:focus, QLineEdit:focus, QListWidget:focus { border: 1px solid #20c9e8; }
+            QListWidget { padding: 4px; outline: none; }
+            QListWidget::item { padding: 8px; border-radius: 3px; }
+            QListWidget::item:hover { background: #0d1c21; }
+            QListWidget::item:selected { background: #14262b; color: #ffb347; border-left: 2px solid #ff9e27; }
+            QSplitter::handle { background: #155b6b; width: 3px; }
+            QSplitter::handle:hover { background: #20c9e8; }
+            QScrollBar:vertical { background: #050607; width: 9px; margin: 2px; }
+            QScrollBar::handle:vertical { background: #24535e; min-height: 24px; border-radius: 4px; }
+            QScrollBar::handle:vertical:hover { background: #20c9e8; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QDialog { background: #080a0d; }
+            QMenu { background: #080a0d; color: #e7edf1; border: 1px solid #20c9e8; padding: 5px; }
+            QMenu::item { padding: 7px 18px; }
+            QMenu::item:selected { background: #14262b; color: #ffb347; }
+            QToolTip { background: #080a0d; color: #e7edf1; border: 1px solid #20c9e8; padding: 5px; }
         """)
 
     def closeEvent(self, event):
@@ -1803,6 +2433,6 @@ class NopAI(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     setup_database()
-    window = NopAI()
+    window = Stomake()
     window.show()
     sys.exit(app.exec())
